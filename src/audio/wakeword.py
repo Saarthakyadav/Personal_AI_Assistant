@@ -27,7 +27,7 @@ class FreeWakeWordDetector:
     def __init__(self,
                  wake_words: List[str] = None,
                  model_path: str = None,
-                 threshold: float = 0.1):   # lowered from 0.5
+                 threshold: float = 0.7):   # raised — reduces false positives from noise
 
         if not OPENWAKEWORD_AVAILABLE:
             raise ImportError("openwakeword not installed. Run: pip install openwakeword")

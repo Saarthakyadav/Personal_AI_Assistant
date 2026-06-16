@@ -66,6 +66,10 @@ class EnhancedMicrophone:
         self.muted = False
         self._mute_lock = threading.Lock()
 
+        # Barge-in: detect wake word during TTS to interrupt speech
+        self.barge_in_mode = False
+        self.barge_in_event = threading.Event()
+
         # FIX #6: track cooldown print so we don't spam the console
         self._cooldown_printed = False
 
@@ -73,7 +77,7 @@ class EnhancedMicrophone:
             try:
                 self.ml_detector = FreeWakeWordDetector(
                     wake_words=wake_words or ["alexa", "hey_jarvis"],
-                    threshold=0.60  # FIX #3: balanced threshold (was 0.98 vs 0.1 mismatch)
+                    threshold=0.80  # Raised from 0.60 — reduces false positives from noise/TTS echo
                 )
                 print("✅ ML wake word detector active (free, open-source)")
             except Exception as e:
@@ -92,6 +96,7 @@ class EnhancedMicrophone:
         self._vad_carryover = np.empty((0,), dtype=np.int16)
         self.silence_frames = 0         # FIX #5: reset properly in start_listening
         self.max_silence_frames = int(self.silence_timeout * 1000 / self.frame_duration_ms)
+        self.max_capture_seconds = 10   # Hard cap — no capture longer than this
         self.is_capturing = False
 
     def start_listening(self):
@@ -115,16 +120,39 @@ class EnhancedMicrophone:
         print("🎤 Microphone listening for wake word...")
         print(f"   Wake words: alexa, hey jarvis")
 
+    # def stop_listening(self):
+    #     self.is_listening = False
+    #     if self.stream:
+    #         self.stream.stop()
+    #         self.stream.close()
+    #         self.stream = None
     def stop_listening(self):
         self.is_listening = False
+
         if self.stream:
-            self.stream.stop()
-            self.stream.close()
+            try:
+                self.stream.abort()
+            except Exception:
+                pass
+
+            try:
+                self.stream.close()
+            except Exception:
+                pass
+
             self.stream = None
+
+    # def set_wakeword_cooldown(self, seconds=3):
+    #     self.ignore_wake_until = time.time() + seconds
+    #     self._cooldown_printed = False   # FIX #6: allow one print per new cooldown
+    #     # Flush openWakeWord's internal buffer so stale audio from before
+    #     # the cooldown can't fire the moment the cooldown expires
+    #     if self.ml_detector is not None:
+    #         self.ml_detector.reset_states()
 
     def set_wakeword_cooldown(self, seconds=3):
         self.ignore_wake_until = time.time() + seconds
-        self._cooldown_printed = False   # FIX #6: allow one print per new cooldown
+        self._cooldown_printed = False
         # Flush openWakeWord's internal buffer so stale audio from before
         # the cooldown can't fire the moment the cooldown expires
         if self.ml_detector is not None:
@@ -133,6 +161,16 @@ class EnhancedMicrophone:
     def _audio_callback(self, indata, frames, time_info, status):
         if status:
             print(f"Audio callback warning: {status}")
+
+        # Barge-in mode: only check wake word during TTS, skip everything else
+        if self.barge_in_mode:
+            if self.use_ml_wakeword and self.ml_detector:
+                audio_chunk = indata.flatten()
+                detected = self.ml_detector.process_frame(audio_chunk)
+                if detected:
+                    print(f"\n\U0001f6d1 Barge-in: '{detected}' detected during speech!")
+                    self.barge_in_event.set()
+            return
 
         # Drop audio while muted (during TTS playback)
         with self._mute_lock:
@@ -144,7 +182,6 @@ class EnhancedMicrophone:
             if getattr(self, '_just_unmuted', False):
                 self._just_unmuted = False
                 return  # skip this one frame, model is already clean
-
         audio_chunk = indata.flatten()
         self.ring_buffer.extend(audio_chunk)
 
@@ -168,11 +205,12 @@ class EnhancedMicrophone:
             if detected_word:
                 self.wake_word_triggered = True
                 self.is_capturing = True
+                self._capture_start_time = time.time()
                 self.silence_frames = 0  # FIX #5: reset silence counter on new capture
                 self._vad_carryover = np.empty((0,), dtype=np.int16)
 
                     # FIX #7: larger pre-roll (0.5s = 8000 samples) to avoid clipping command start
-                pre_roll = self.ring_buffer.get_last_n(8000)
+                pre_roll = self.ring_buffer.get_last_n(3200)
                 self.current_utterance = list(pre_roll) if len(pre_roll) > 0 else []
 
                 print(f"\n🟢 Wake word detected: '{detected_word}'")
@@ -183,51 +221,66 @@ class EnhancedMicrophone:
         if self.is_capturing:
             self.current_utterance.extend(audio_chunk)
 
+            # Check max capture duration first
+            elapsed = time.time() - getattr(self, '_capture_start_time', time.time())
+            timed_out = elapsed >= self.max_capture_seconds
+
             try:
-                vad_audio = np.concatenate((self._vad_carryover, audio_chunk)) if self._vad_carryover.size else audio_chunk
+                vad_audio = (
+                    np.concatenate((self._vad_carryover, audio_chunk))
+                    if self._vad_carryover.size
+                    else audio_chunk
+                )
+
                 self._vad_carryover = np.empty((0,), dtype=np.int16)
 
                 speech_frames = 0
-                trailing_silence_frames = 0
-                is_speech = False
+                total_frames = 0
+                silence_frames_in_chunk = 0
 
                 for i in range(0, len(vad_audio), self.vad_frame_size):
                     vad_chunk = vad_audio[i:i + self.vad_frame_size]
+
                     if len(vad_chunk) < self.vad_frame_size:
                         self._vad_carryover = vad_chunk
                         break
 
-                    frame_speech = self.vad.is_speech(vad_chunk.tobytes(), self.sample_rate)
-                    if frame_speech:
+                    total_frames += 1
+                    if self.vad.is_speech(vad_chunk.tobytes(), self.sample_rate):
                         speech_frames += 1
-                        trailing_silence_frames = 0
                     else:
-                        trailing_silence_frames += 1
+                        silence_frames_in_chunk += 1
 
-                is_speech = speech_frames > 0
-                if is_speech:
-                    self.silence_frames = trailing_silence_frames
+                # Only reset silence counter if MAJORITY of frames are speech.
+                # This prevents a single noisy frame from keeping capture alive.
+                if total_frames > 0 and speech_frames > total_frames / 2:
+                    self.silence_frames = 0
                 else:
-                    self.silence_frames += trailing_silence_frames
+                    self.silence_frames += silence_frames_in_chunk
 
             except Exception:
-                is_speech = True
-
-            if not is_speech:
-
-                    # Prevent immediate retrigger during processing
-                    self.ignore_wake_until = time.time() + 5
-                    self._cooldown_printed = False
-
-                    # Mute NOW to block re-triggering during transcription + LLM + TTS
-                    with self._mute_lock:
-                        self.muted = True
-
-                    utterance = np.array(self.current_utterance, dtype=np.int16)
-                    self.audio_queue.put(("utterance_ready", utterance))
-                    self.current_utterance = []
-            else:
                 self.silence_frames = 0
+
+            # End capture on silence timeout OR max duration
+            if self.silence_frames >= self.max_silence_frames or timed_out:
+
+                reason = "max duration" if timed_out else "silence"
+                print(f"\n\u23f1\ufe0f Capture ended after {elapsed:.1f}s (reason={reason})")
+
+                # Prevent retriggering while processing
+                self.ignore_wake_until = time.time() + 2
+                self._cooldown_printed = False
+
+                utterance = np.array(self.current_utterance, dtype=np.int16)
+
+                self.audio_queue.put(("utterance_ready", utterance))
+
+                # IMPORTANT: reset capture state
+                self.current_utterance = []
+                self.is_capturing = False
+                self.wake_word_triggered = False
+                self.silence_frames = 0
+                self._vad_carryover = np.empty((0,), dtype=np.int16)
 
     def get_utterance(self, timeout: float = 5.0) -> Optional[np.ndarray]:
         try:

@@ -1,15 +1,34 @@
-﻿# main.py
+# main.py
 """
 Agentic Voice AI - Nova Assistant
 Starts automatically in wake word mode using src/audio/mic.py and src/audio/wakeword.py.
 """
 
-import os
 import sys
+import io
+
+# Force UTF-8 output on Windows (CP1252 can't handle emoji)
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
+import os
+import signal
 import tempfile
 import wave
 import time
 import threading
+
+# ── Graceful shutdown flag ───────────────────────────────────
+_shutdown = threading.Event()
+
+def _sigint_handler(sig, frame):
+    """Set the shutdown flag so every loop can check it cleanly."""
+    print("\n\n🛑 Ctrl+C received — shutting down...")
+    _shutdown.set()
+
+signal.signal(signal.SIGINT, _sigint_handler)
 
 import numpy as np
 import pyttsx3
@@ -34,16 +53,13 @@ print("=" * 60)
 print("🎙️ Agentic Voice AI - Nova Assistant")
 print("=" * 60)
 
-# ── TTS ──────────────────────────────────────────────────────
-print("\n🔊 Initializing TTS...")
-tts = pyttsx3.init()
-tts.setProperty('rate', 160)
-for voice in tts.getProperty('voices'):
-    if 'david' in voice.name.lower():
-        tts.setProperty('voice', voice.id)
-        print(f"   ✅ Voice: {voice.name}")
-        break
-print("✅ TTS ready")
+# ── TTS config ───────────────────────────────────────────────
+# pyttsx3 engine is created fresh per call inside the TTS thread.
+# Reusing a global engine from a non-main thread causes COM deadlocks on Windows.
+TTS_RATE = 160
+TTS_VOICE_KEYWORD = 'david'
+TTS_TIMEOUT = 30  # seconds — safety limit so we never hang forever
+print("✅ TTS ready (per-call engine)")
 
 # ── Groq ─────────────────────────────────────────────────────
 print("\n🧠 Initializing Groq...")
@@ -76,35 +92,60 @@ wakeword_cleanup = TextWakeWordDetector(wake_words=WAKE_WORDS)
 
 # ─────────────────────────────────────────────────────────────
 def _tts_speak(text: str):
-    """Run pyttsx3 in its own thread so a KeyboardInterrupt in the main
-    thread cannot propagate into the COM event loop (Windows SAPI5 bug)."""
+    """Create a fresh pyttsx3 engine per call to avoid Windows COM deadlock."""
     try:
-        tts.say(text)
-        tts.runAndWait()
+        engine = pyttsx3.init()
+        engine.setProperty('rate', TTS_RATE)
+        for voice in engine.getProperty('voices'):
+            if TTS_VOICE_KEYWORD in voice.name.lower():
+                engine.setProperty('voice', voice.id)
+                break
+        engine.say(text)
+        engine.runAndWait()
+        engine.stop()
     except Exception as e:
         print(f"   ⚠️ TTS error: {e}")
 
 
 def speak(text: str):
+    """Mute mic → TTS in a fresh-engine thread → unmute with cooldown."""
     print(f"\n🤖 {text}")
 
-    with mic._mute_lock:
-        mic.muted = True
+    try:
+        with mic._mute_lock:
+            mic.muted = True
 
-    # TTS in a dedicated thread — main thread stays interruptible
-    t = threading.Thread(target=_tts_speak, args=(text,), daemon=True)
-    t.start()
-    t.join()
+        t = threading.Thread(
+            target=_tts_speak,
+            args=(text,),
+            daemon=True
+        )
+        t.start()
 
-    # Small pause for headphone driver buffer to drain
-    time.sleep(0.3)
+        # Join with short timeouts so main thread stays interruptible.
+        # Safety cap: if TTS hangs longer than TTS_TIMEOUT, move on.
+        waited = 0.0
+        while t.is_alive() and waited < TTS_TIMEOUT:
+            t.join(timeout=0.1)
+            waited += 0.1
+            if _shutdown.is_set():
+                break
 
-    # Flush openWakeWord stale buffer, then unmute
-    mic.set_wakeword_cooldown(3)
+        if t.is_alive():
+            print("   ⚠️ TTS timed out, continuing...")
 
-    with mic._mute_lock:
-        mic._just_unmuted = True
-        mic.muted = False
+        # Small pause for driver buffer to drain
+        time.sleep(0.3)
+
+    finally:
+        # Reset model state and set cooldown
+        mic.set_wakeword_cooldown(2)
+
+        with mic._mute_lock:
+            mic._just_unmuted = True
+            mic.muted = False
+
+        print("\n🎤 Listening for wake word...")
 
 
 def audio_to_wav_file(audio: np.ndarray) -> str:
@@ -162,8 +203,11 @@ def ask_llm(question: str) -> str:
 
 
 def process_wake_command(audio: np.ndarray):
-    # FIX #2 & #8: single try/finally guarantees mic is always unmuted,
-    # no matter which branch exits — no more scattered manual unmute calls
+    # Mute mic immediately so the model can't false-trigger during
+    # transcription + LLM (which can take 2-5 seconds).
+    with mic._mute_lock:
+        mic.muted = True
+
     try:
         if audio is None or len(audio) == 0:
             speak("I didn't capture any command. Please try again.")
@@ -210,14 +254,15 @@ def process_wake_command(audio: np.ndarray):
         speak(response)
 
     finally:
-        # FIX #2 & #8: safety unmute for every early-return path that skips speak().
-        # speak() already unmutes itself after setting cooldown, so this is a no-op
-        # on the normal path but saves us on any error/early-return path.
+        # Safety unmute: always guarantee mic is unmuted when we exit.
+        # speak() already unmutes + sets cooldown on the normal path,
+        # but early-return paths (e.g. "too short") skip speak().
         with mic._mute_lock:
             if mic.muted:
-                mic.set_wakeword_cooldown(4)
+                mic.set_wakeword_cooldown(2)
                 mic._just_unmuted = True
                 mic.muted = False
+                print("\n🎤 Listening for wake word...")
 
 
 def run_wake_word_mode():
@@ -228,20 +273,21 @@ def run_wake_word_mode():
     print("─" * 60)
 
     try:
-        while True:
+        while not _shutdown.is_set():
             utterance = mic.get_utterance(timeout=0.5)
             if utterance is None:
                 continue
             print("\n🟢 Wake word detected. Processing command...")
             process_wake_command(utterance)
-            print("\n👂 Listening for wake word again...")
-
-    except KeyboardInterrupt:
-        print("\n\n🛑 Stopping assistant.")
 
     finally:
-        mic.stop_listening()
-        print("\n👋 Session ended")
+        print("\n🛑 Stopping assistant...")
+        try:
+            mic.stop_listening()
+        except Exception:
+            pass
+        print("👋 Session ended")
+        os._exit(0)
 
 
 if __name__ == "__main__":
