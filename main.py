@@ -9,6 +9,7 @@ import sys
 import tempfile
 import wave
 import time
+import threading
 
 import numpy as np
 import pyttsx3
@@ -20,10 +21,14 @@ from src.audio.wakeword import TextWakeWordDetector
 
 load_dotenv()
 
-RATE        = 16000
-CHANNELS    = 1
+RATE         = 16000
+CHANNELS     = 1
 SAMPLE_WIDTH = 2
-WAKE_WORDS  = ["alexa", "hey jarvis"]
+WAKE_WORDS   = ["alexa", "hey jarvis"]
+
+# FIX #10: conversation memory — keep last N exchanges for context
+MAX_HISTORY_TURNS = 10
+conversation_history = []
 
 print("=" * 60)
 print("🎙️ Agentic Voice AI - Nova Assistant")
@@ -70,24 +75,36 @@ wakeword_cleanup = TextWakeWordDetector(wake_words=WAKE_WORDS)
 
 
 # ─────────────────────────────────────────────────────────────
+def _tts_speak(text: str):
+    """Run pyttsx3 in its own thread so a KeyboardInterrupt in the main
+    thread cannot propagate into the COM event loop (Windows SAPI5 bug)."""
+    try:
+        tts.say(text)
+        tts.runAndWait()
+    except Exception as e:
+        print(f"   ⚠️ TTS error: {e}")
+
+
 def speak(text: str):
     print(f"\n🤖 {text}")
 
     with mic._mute_lock:
         mic.muted = True
 
-    tts.say(text)
-    tts.runAndWait()
+    # TTS in a dedicated thread — main thread stays interruptible
+    t = threading.Thread(target=_tts_speak, args=(text,), daemon=True)
+    t.start()
+    t.join()
 
-    # allow speaker echo to die down
-    time.sleep(1.0)
+    # Small pause for headphone driver buffer to drain
+    time.sleep(0.3)
 
-    with mic._mute_lock:
-        mic.muted = False
-
-    # ignore wake words for 3 seconds
+    # Flush openWakeWord stale buffer, then unmute
     mic.set_wakeword_cooldown(3)
 
+    with mic._mute_lock:
+        mic._just_unmuted = True
+        mic.muted = False
 
 
 def audio_to_wav_file(audio: np.ndarray) -> str:
@@ -104,29 +121,40 @@ def audio_to_wav_file(audio: np.ndarray) -> str:
 def transcribe_audio(audio_file: str) -> str:
     """Transcribe audio using Groq Whisper."""
     print("   📝 Transcribing with Whisper...")
-    with open(audio_file, 'rb') as f:
-        result = client.audio.transcriptions.create(
-            file=(audio_file, f.read()),
-            model="whisper-large-v3",
-            language="en",
-            response_format="text",
-        )
+    # FIX #9: always clean up temp file even if transcription fails
     try:
-        os.unlink(audio_file)
-    except Exception:
-        pass
-    return result
+        with open(audio_file, 'rb') as f:
+            result = client.audio.transcriptions.create(
+                file=(audio_file, f.read()),
+                model="whisper-large-v3",
+                language="en",
+                response_format="text",
+            )
+        return result
+    finally:
+        try:
+            os.unlink(audio_file)
+        except Exception:
+            pass
 
 
 def ask_llm(question: str) -> str:
-    """Query Groq Llama."""
+    """Query Groq Llama with rolling conversation history."""
     print("   🧠 Thinking...")
+
+    # FIX #10: build messages with full history for context
+    system_msg = {
+        "role": "system",
+        "content": (
+            "You are a helpful voice assistant named Nova. "
+            "Be concise and direct. Keep replies to 1-3 sentences."
+        )
+    }
+    messages = [system_msg] + conversation_history + [{"role": "user", "content": question}]
+
     resp = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": "You are a helpful voice assistant named Nova. Be concise and direct."},
-            {"role": "user",   "content": question},
-        ],
+        messages=messages,
         max_tokens=200,
         temperature=0.7,
     )
@@ -134,50 +162,62 @@ def ask_llm(question: str) -> str:
 
 
 def process_wake_command(audio: np.ndarray):
-    if audio is None or len(audio) == 0:
-        with mic._mute_lock:
-            mic.muted = False
-        speak("I didn't capture any command. Please try again.")
-        return
-
-    wav_path = audio_to_wav_file(audio)
+    # FIX #2 & #8: single try/finally guarantees mic is always unmuted,
+    # no matter which branch exits — no more scattered manual unmute calls
     try:
-        transcript = transcribe_audio(wav_path)
+        if audio is None or len(audio) == 0:
+            speak("I didn't capture any command. Please try again.")
+            return
+
+        wav_path = audio_to_wav_file(audio)
+        try:
+            transcript = transcribe_audio(wav_path)
+        except Exception as e:
+            print(f"\n❌ Transcription error: {e}")
+            speak("I couldn't transcribe that. Please try again.")
+            return
+
         if not transcript or len(transcript.strip().split()) < 2:
             print("   ⚠️ Too short, ignoring (likely noise)")
-            with mic._mute_lock:
-                mic.muted = False  # ← must unmute here too
             return
-    except Exception as e:
-        print(f"\n❌ Transcription error: {e}")
-        with mic._mute_lock:
-            mic.muted = False
-        speak("I couldn't transcribe that. Please try again.")
-        return
 
-    cleaned = transcript
-    if wakeword_cleanup.detect_in_text(transcript):
-        cleaned = wakeword_cleanup.remove_wake_word(transcript)
+        cleaned = transcript
+        if wakeword_cleanup.detect_in_text(transcript):
+            cleaned = wakeword_cleanup.remove_wake_word(transcript)
 
-    print(f"\n📝 Heard: {transcript}")
-    if cleaned != transcript:
-        print(f"📝 Command: {cleaned}")
+        print(f"\n📝 Heard: {transcript}")
+        if cleaned != transcript:
+            print(f"📝 Command: {cleaned}")
 
-    if not cleaned.strip():
-        with mic._mute_lock:
-            mic.muted = False
-        speak("I heard the wake word but not a command. Please try again.")
-        return
+        if not cleaned.strip():
+            speak("I heard the wake word but not a command. Please try again.")
+            return
 
-    print("\n🎯 Processing...")
-    try:
-        response = ask_llm(cleaned)
+        print("\n🎯 Processing...")
+        try:
+            response = ask_llm(cleaned)
+        except Exception as e:
+            print(f"\n❌ LLM error: {e}")
+            speak("Something went wrong. Please try again.")
+            return
+
+        # FIX #10: save this exchange to history, trim to window
+        conversation_history.append({"role": "user", "content": cleaned})
+        conversation_history.append({"role": "assistant", "content": response})
+        if len(conversation_history) > MAX_HISTORY_TURNS * 2:
+            del conversation_history[:2]  # drop oldest exchange
+
         speak(response)
-    except Exception as e:
-        print(f"\n❌ LLM error: {e}")
+
+    finally:
+        # FIX #2 & #8: safety unmute for every early-return path that skips speak().
+        # speak() already unmutes itself after setting cooldown, so this is a no-op
+        # on the normal path but saves us on any error/early-return path.
         with mic._mute_lock:
-            mic.muted = False
-        speak("Something went wrong. Please try again.")
+            if mic.muted:
+                mic.set_wakeword_cooldown(4)
+                mic._just_unmuted = True
+                mic.muted = False
 
 
 def run_wake_word_mode():

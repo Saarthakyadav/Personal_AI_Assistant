@@ -1,4 +1,13 @@
 """
+DEPRECATED — use main.py instead.
+This file is an older standalone version kept for reference only.
+It will be removed in a future cleanup.
+"""
+raise SystemExit(
+    'This file is deprecated. Run: python main.py'
+)
+
+"""
 Agentic Voice Assistant with Groq Whisper API
 Uses Groq's ultra-fast Whisper implementation for speech recognition
 """

@@ -99,6 +99,21 @@ class FreeWakeWordDetector:
     def process_audio_chunk(self, audio_chunk: np.ndarray) -> Optional[str]:
         return self.process_frame(audio_chunk)
 
+    def reset_states(self):
+        """
+        Clear openWakeWord's internal audio buffer and prediction history.
+        Call this after TTS finishes so stale audio can't cause a false trigger
+        the moment cooldown expires.
+        """
+        if self.model is None:
+            return
+        try:
+            self.model.reset()
+        except AttributeError:
+            # Older openwakeword versions: manually zero the prediction history
+            for key in self.model.prediction_buffer:
+                self.model.prediction_buffer[key] = [0.0] * len(self.model.prediction_buffer[key])
+
 
 class SimpleFrequencyDetector:
     """Ultra-simple energy-based detector. No ML, no wake word specificity."""

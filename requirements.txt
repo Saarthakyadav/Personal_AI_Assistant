@@ -1,18 +1,19 @@
-# Audio - using pre-compiled binaries only
-pyaudio==0.2.11
-numpy==1.24.3
+# Audio I/O
+sounddevice==0.4.6
+numpy>=1.24.3
 
-# STT - no compilation needed
-SpeechRecognition==3.10.0
-pocketsphinx==5.0.0  # Offline, no compiler needed
+# Voice Activity Detection
+webrtcvad==2.0.10
 
-# TTS - works
+# Wake word detection (free, local, open-source)
+openwakeword==0.6.0
+
+# Speech-to-text (via Groq Whisper API)
+groq>=0.9.0
+
+# Text-to-speech (local, no API key needed)
 pyttsx3==2.90
-
-# LLM
-groq==0.9.0
 
 # Utilities
 python-dotenv==1.0.0
-pydantic==2.6.0
-colorama==0.4.6
+pydantic>=2.6.0
