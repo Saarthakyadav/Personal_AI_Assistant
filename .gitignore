@@ -43,7 +43,6 @@ tmp/
 *.mp3
 *.ogg
 recordings/
-audio/
 cache_audio/
 
 # Model Cache
