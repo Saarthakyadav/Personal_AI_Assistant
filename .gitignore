@@ -1,0 +1,114 @@
+# Python
+
+**pycache**/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+
+venv/
+env/
+.venv/
+
+# Environment Variables
+
+.env
+.env.local
+.env.*
+
+# IDE
+
+.vscode/
+.idea/
+
+# OS Files
+
+.DS_Store
+Thumbs.db
+
+# Logs
+
+*.log
+logs/
+
+# Temporary Files
+
+temp/
+tmp/
+*.tmp
+
+# Audio Files
+
+*.wav
+*.mp3
+*.ogg
+recordings/
+audio/
+cache_audio/
+
+# Model Cache
+
+.cache/
+models/
+downloads/
+
+# openWakeWord Cache
+
+openwakeword_cache/
+*.onnx
+
+# Jupyter
+
+.ipynb_checkpoints/
+
+# Test Coverage
+
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Build Files
+
+build/
+dist/
+*.egg-info/
+
+# Secrets
+
+secrets.json
+credentials.json
+service_account.json
+
+# Runtime Data
+
+*.pid
+*.lock
+
+# MyPy
+
+.mypy_cache/
+
+# Ruff
+
+.ruff_cache/
+
+# Pyright
+
+.pyright/
+
+# PyInstaller
+
+*.spec
+
+# Local Databases
+
+*.db
+*.sqlite3
+*.sqlite
+
+# Generated Files
+
+output/
+exports/
+generated/
+*.whl

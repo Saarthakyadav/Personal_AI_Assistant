@@ -1,0 +1,18 @@
+# Audio - using pre-compiled binaries only
+pyaudio==0.2.11
+numpy==1.24.3
+
+# STT - no compilation needed
+SpeechRecognition==3.10.0
+pocketsphinx==5.0.0  # Offline, no compiler needed
+
+# TTS - works
+pyttsx3==2.90
+
+# LLM
+groq==0.9.0
+
+# Utilities
+python-dotenv==1.0.0
+pydantic==2.6.0
+colorama==0.4.6
