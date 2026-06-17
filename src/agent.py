@@ -274,11 +274,12 @@ class AgentCore:
                 return None
 
             # Extract the failed_generation content
-            # Handles both formats:
+            # Handles all formats:
             #   <function=web_search{"query": "..."}</function>
             #   <function=web_search[]{"query": "..."}</function>
+            #   <function=web_search={"query": "..."}</function>
             match = re.search(
-                r'<function=(\w+)(?:\[.*?\])?\s*(\{.*?\})\s*</function>',
+                r'<function=(\w+)[^\{]*(\{.*?\})\s*</function>',
                 error_str,
             )
             if match:
