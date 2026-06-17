@@ -38,6 +38,10 @@ from groq import Groq
 from src.audio.mic import EnhancedMicrophone
 from src.audio.wakeword import TextWakeWordDetector
 from src.memory import UserMemory
+from src.agent import AgentCore
+from src.tools import ToolRegistry
+from src.tools.builtins import ALL_BUILTIN_TOOLS
+from src.tools.reminders import ReminderService, create_reminder_tool
 
 load_dotenv()
 
@@ -77,6 +81,13 @@ print("\n🧠 Loading user memory...")
 memory = UserMemory(filepath=os.path.join(os.path.dirname(__file__), "user_memory.json"))
 print(f"✅ User memory ready ({memory.fact_count} fact(s) loaded)")
 
+# ── Tool registry ────────────────────────────────────────────
+print("\n🔧 Registering tools...")
+tool_registry = ToolRegistry()
+for tool in ALL_BUILTIN_TOOLS:
+    tool_registry.register(tool)
+print(f"✅ {tool_registry.count} built-in tool(s) registered: {tool_registry.tool_names}")
+
 # ── Microphone ───────────────────────────────────────────────
 print("\n🎤 Initializing wake word microphone...")
 try:
@@ -94,6 +105,14 @@ except Exception as e:
     sys.exit(1)
 
 wakeword_cleanup = TextWakeWordDetector(wake_words=WAKE_WORDS)
+
+# ── Reminder service (needs speak(), which is defined below) ─
+# Initialized later after speak() is defined.
+reminder_service = None
+agent = None
+
+# ── TTS lock — prevents reminder and command speech from colliding ─
+_tts_lock = threading.Lock()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -115,54 +134,57 @@ def _tts_speak(text: str):
 
 def speak(text: str):
     """Mute mic → TTS in a fresh-engine thread → unmute with cooldown."""
-    print(f"\n🤖 {text}")
+    with _tts_lock:
+        print(f"\n🤖 {text}")
 
-    try:
-        with mic._mute_lock:
-            mic.muted = True
+        try:
+            with mic._mute_lock:
+                mic.muted = True
 
-        t = threading.Thread(
-            target=_tts_speak,
-            args=(text,),
-            daemon=True
-        )
-        t.start()
+            t = threading.Thread(
+                target=_tts_speak,
+                args=(text,),
+                daemon=True
+            )
+            t.start()
 
-        # Join with short timeouts so main thread stays interruptible.
-        # Safety cap: if TTS hangs longer than TTS_TIMEOUT, move on.
-        waited = 0.0
-        while t.is_alive() and waited < TTS_TIMEOUT:
-            t.join(timeout=0.1)
-            waited += 0.1
-            if _shutdown.is_set():
-                break
+            # Join with short timeouts so main thread stays interruptible.
+            # Safety cap: if TTS hangs longer than TTS_TIMEOUT, move on.
+            waited = 0.0
+            while t.is_alive() and waited < TTS_TIMEOUT:
+                t.join(timeout=0.1)
+                waited += 0.1
+                if _shutdown.is_set():
+                    break
 
-        if t.is_alive():
-            print("   ⚠️ TTS timed out, continuing...")
+            if t.is_alive():
+                print("   ⚠️ TTS timed out, continuing...")
 
-        # Small pause for driver buffer to drain
-        time.sleep(0.3)
+            # Small pause for driver buffer to drain
+            time.sleep(0.3)
 
-    finally:
-        # Reset model state and set cooldown
-        mic.set_wakeword_cooldown(2)
+        finally:
+            # Reset model state and set cooldown
+            mic.set_wakeword_cooldown(2)
 
-        with mic._mute_lock:
-            mic._just_unmuted = True
-            mic.muted = False
+            with mic._mute_lock:
+                mic._just_unmuted = True
+                mic.muted = False
 
-        print("\n🎤 Listening for wake word...")
+            print("\n🎤 Listening for wake word...")
 
 
 def audio_to_wav_file(audio: np.ndarray) -> str:
     """Save int16 numpy buffer to a temp WAV file."""
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
-    with wave.open(tmp.name, 'wb') as wf:
+    tmp_name = tmp.name
+    tmp.close()  # Close handle to avoid ResourceWarning
+    with wave.open(tmp_name, 'wb') as wf:
         wf.setnchannels(CHANNELS)
         wf.setsampwidth(SAMPLE_WIDTH)
         wf.setframerate(RATE)
         wf.writeframes(audio.astype(np.int16).tobytes())
-    return tmp.name
+    return tmp_name
 
 
 def transcribe_audio(audio_file: str) -> str:
@@ -185,30 +207,41 @@ def transcribe_audio(audio_file: str) -> str:
             pass
 
 
-def ask_llm(question: str) -> str:
-    """Query Groq Llama with rolling conversation history."""
-    print("   🧠 Thinking...")
+def voice_confirm(tool_name: str, description: str) -> bool:
+    """Speak a confirmation prompt, listen via mic, transcribe, check for yes/no."""
+    speak(f"I'm about to {description}. Should I proceed?")
 
-    # FIX #10: build messages with full history for context
-    # Inject persistent user-profile facts into the system prompt
-    facts_block = memory.get_facts_prompt()
-    system_content = (
-        "You are a helpful voice assistant named Nova. "
-        "Be concise and direct. Keep replies to 1-3 sentences."
-    )
-    if facts_block:
-        system_content += "\n\n" + facts_block
+    print("🎤 Waiting for confirmation...")
+    mic.wake_word_triggered = True     # Skip wake word detection
+    mic.is_capturing = True
+    mic._capture_start_time = time.time()
+    mic.silence_frames = 0
+    mic.current_utterance = []
+    mic.max_capture_seconds = 5        # Short capture window
 
-    system_msg = {"role": "system", "content": system_content}
-    messages = [system_msg] + conversation_history + [{"role": "user", "content": question}]
+    with mic._mute_lock:
+        mic._just_unmuted = True
+        mic.muted = False
 
-    resp = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=messages,
-        max_tokens=200,
-        temperature=0.7,
-    )
-    return resp.choices[0].message.content
+    try:
+        utterance = mic.get_utterance(timeout=6)
+
+        # Re-mute since we're still in process_wake_command
+        with mic._mute_lock:
+            mic.muted = True
+
+        if utterance is None or len(utterance) == 0:
+            speak("I didn't hear a response. Cancelling.")
+            return False
+
+        wav_path = audio_to_wav_file(utterance)
+        transcript = transcribe_audio(wav_path).strip().lower()
+        print(f"   📝 Confirmation response: '{transcript}'")
+
+        yes_words = {"yes", "yeah", "yep", "sure", "go ahead", "do it", "okay", "ok", "confirm"}
+        return any(word in transcript for word in yes_words)
+    finally:
+        mic.max_capture_seconds = 10   # Always restore, even on timeout/error
 
 
 def process_wake_command(audio: np.ndarray):
@@ -246,15 +279,19 @@ def process_wake_command(audio: np.ndarray):
             speak("I heard the wake word but not a command. Please try again.")
             return
 
-        print("\n🎯 Processing...")
+        print("\n🎯 Processing with agent...")
         try:
-            response = ask_llm(cleaned)
+            response = agent.run(
+                user_message=cleaned,
+                conversation_history=conversation_history,
+                confirm_callback=voice_confirm,
+            )
         except Exception as e:
-            print(f"\n❌ LLM error: {e}")
+            print(f"\n❌ Agent error: {e}")
             speak("Something went wrong. Please try again.")
             return
 
-        # FIX #10: save this exchange to history, trim to window
+        # Save this exchange to history, trim to window
         conversation_history.append({"role": "user", "content": cleaned})
         conversation_history.append({"role": "assistant", "content": response})
         if len(conversation_history) > MAX_HISTORY_TURNS * 2:
@@ -281,8 +318,36 @@ def process_wake_command(audio: np.ndarray):
                 print("\n🎤 Listening for wake word...")
 
 
+def _init_services():
+    """Initialize services that depend on speak() being defined."""
+    global reminder_service, agent
+
+    # Reminder service — uses speak() for TTS
+    print("\n⏰ Starting reminder service...")
+    reminder_service = ReminderService(
+        filepath=os.path.join(os.path.dirname(__file__), "reminders.json"),
+        speak_callback=speak,
+    )
+    reminder_tool = create_reminder_tool(reminder_service)
+    tool_registry.register(reminder_tool)
+    reminder_service.start()
+    print(f"✅ Tools ready: {tool_registry.tool_names}")
+
+    # Agent core — the reasoning loop
+    print("\n🧠 Initializing agent core...")
+    agent = AgentCore(
+        groq_client=client,
+        memory=memory,
+        tool_registry=tool_registry,
+        max_steps=5,
+    )
+    print("✅ Agent core ready")
+
+
 def run_wake_word_mode():
     """Start the assistant in wake word mode and keep listening."""
+    _init_services()
+
     print("\n✅ Nova Assistant Ready!")
     print(f"   Say 'Alexa' or 'Hey Jarvis' to activate")
     print("   Press Ctrl+C to quit")
@@ -298,6 +363,11 @@ def run_wake_word_mode():
 
     finally:
         print("\n🛑 Stopping assistant...")
+        try:
+            if reminder_service:
+                reminder_service.stop()
+        except Exception:
+            pass
         try:
             mic.stop_listening()
         except Exception:

@@ -111,3 +111,8 @@ output/
 exports/
 generated/
 *.whl
+
+# User Data
+
+user_memory.json
+reminders.json
