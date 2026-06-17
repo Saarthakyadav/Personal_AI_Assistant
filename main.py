@@ -37,6 +37,7 @@ from groq import Groq
 
 from src.audio.mic import EnhancedMicrophone
 from src.audio.wakeword import TextWakeWordDetector
+from src.memory import UserMemory
 
 load_dotenv()
 
@@ -70,6 +71,11 @@ if not api_key:
     sys.exit(1)
 client = Groq(api_key=api_key)
 print("✅ Groq ready (Whisper + Llama)")
+
+# ── Persistent user memory ───────────────────────────────────
+print("\n🧠 Loading user memory...")
+memory = UserMemory(filepath=os.path.join(os.path.dirname(__file__), "user_memory.json"))
+print(f"✅ User memory ready ({memory.fact_count} fact(s) loaded)")
 
 # ── Microphone ───────────────────────────────────────────────
 print("\n🎤 Initializing wake word microphone...")
@@ -184,13 +190,16 @@ def ask_llm(question: str) -> str:
     print("   🧠 Thinking...")
 
     # FIX #10: build messages with full history for context
-    system_msg = {
-        "role": "system",
-        "content": (
-            "You are a helpful voice assistant named Nova. "
-            "Be concise and direct. Keep replies to 1-3 sentences."
-        )
-    }
+    # Inject persistent user-profile facts into the system prompt
+    facts_block = memory.get_facts_prompt()
+    system_content = (
+        "You are a helpful voice assistant named Nova. "
+        "Be concise and direct. Keep replies to 1-3 sentences."
+    )
+    if facts_block:
+        system_content += "\n\n" + facts_block
+
+    system_msg = {"role": "system", "content": system_content}
     messages = [system_msg] + conversation_history + [{"role": "user", "content": question}]
 
     resp = client.chat.completions.create(
@@ -250,6 +259,13 @@ def process_wake_command(audio: np.ndarray):
         conversation_history.append({"role": "assistant", "content": response})
         if len(conversation_history) > MAX_HISTORY_TURNS * 2:
             del conversation_history[:2]  # drop oldest exchange
+
+        # Extract user facts in background (non-blocking)
+        threading.Thread(
+            target=memory.extract_and_store,
+            args=(cleaned, response, client),
+            daemon=True,
+        ).start()
 
         speak(response)
 
