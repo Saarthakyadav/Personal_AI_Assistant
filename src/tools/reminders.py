@@ -105,7 +105,12 @@ class ReminderService:
                     dt = datetime.fromisoformat(reminder["time"])
                 except ValueError:
                     continue
-                if dt <= now:
+                
+                compare_now = now
+                if dt.tzinfo is not None:
+                    compare_now = datetime.now(dt.tzinfo)
+
+                if dt <= compare_now:
                     to_fire.append(reminder)
 
         # Fire outside the lock so speak() (which is blocking) doesn't

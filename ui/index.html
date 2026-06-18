@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Nova — Your personal AI assistant with voice-first, agentic intelligence. Manage conversations, memories, documents, and automations." />
+  <title>Nova — Personal AI Assistant</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+
+<!-- Mobile sidebar toggle -->
+<button class="mobile-toggle" id="mobile-toggle" title="Toggle sidebar">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+</button>
+
+<div class="app">
+
+  <!-- ============================================================ -->
+  <!-- RAIL / SIDEBAR                                                -->
+  <!-- ============================================================ -->
+  <aside class="rail">
+    <div class="brand">
+      <div class="orb-wrap"><div class="orb-ring"></div><div class="orb"></div></div>
+      <div class="brand-text">
+        <h1>Nova</h1>
+        <p>personal · agentic · voice-first</p>
+      </div>
+    </div>
+
+    <nav class="nav" aria-label="Main navigation">
+      <button class="nav-item active" data-view="chat" id="nav-chat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-1.9 5.4L21 21l-4.3-1.1a8.5 8.5 0 1 1 4.3-8.4Z"/></svg>
+        Chat
+      </button>
+      <button class="nav-item" data-view="memory" id="nav-memory">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="9" r="3.2"/><circle cx="16" cy="9" r="3.2"/><path d="M8 12.2v2a2.8 2.8 0 0 0 2.8 2.8h2.4A2.8 2.8 0 0 0 16 14.2v-2"/></svg>
+        Memory
+      </button>
+      <button class="nav-item" data-view="documents" id="nav-documents">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M14 3v4h4M9 12h6M9 15.5h6"/></svg>
+        Documents
+      </button>
+      <button class="nav-item" data-view="automations" id="nav-automations">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="7.2"/><path d="M12 9.2V13l2.6 1.6M9.6 3.4h4.8"/></svg>
+        Automations
+      </button>
+      <button class="nav-item" data-view="agents" id="nav-agents">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5.5" r="2"/><circle cx="6" cy="17" r="2"/><circle cx="18" cy="17" r="2"/><path d="M12 7.5v3M10.4 13.2 7.6 15.4M13.6 13.2l2.8 2.2"/></svg>
+        Agents
+      </button>
+    </nav>
+
+    <p class="rail-label">Recent</p>
+    <div class="conversations" role="list">
+      <button class="conv-item active" role="listitem">Current session</button>
+    </div>
+
+    <div class="rail-foot">
+      <button class="settings-btn" id="settings-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 13.5a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.04 1.56V19.5a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.04H2.5a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.56-1.1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H8.6A1.7 1.7 0 0 0 9.6 2.6V2.5a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1.04 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.07a1.7 1.7 0 0 0 1.56 1.04h.1a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.56 1.04Z"/></svg>
+        Settings
+      </button>
+      <span class="kbd" title="Ctrl+K to focus input">⌘K</span>
+    </div>
+  </aside>
+
+  <!-- ============================================================ -->
+  <!-- CONTENT AREA                                                  -->
+  <!-- ============================================================ -->
+  <main class="content">
+
+    <!-- ==================== CHAT VIEW ==================== -->
+    <section class="view active" id="view-chat">
+      <header class="chat-top">
+        <div class="presence">
+          <span class="dot"></span>
+          <span class="presence-text">Nova online · turn <span id="turn-count">0</span></span>
+        </div>
+        <div class="chat-top-actions">
+          <button class="ghost-btn" id="clear-history-btn" title="Clear conversation">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+            Clear
+          </button>
+          <button class="ghost-btn" id="toggle-activity">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2 7 4-14 2 7h4"/></svg>
+            Activity
+          </button>
+        </div>
+      </header>
+
+      <div class="chat-body">
+        <!-- Thread — populated dynamically from /api/history -->
+        <div class="thread" id="thread"></div>
+
+        <!-- ACTIVITY DRAWER -->
+        <aside class="activity-drawer" id="activity">
+          <div class="activity-inner">
+            <h3>Reasoning trace</h3>
+            <div id="trace-container">
+              <!-- Trace steps populated dynamically -->
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <footer class="composer">
+        <button class="icon-btn" id="attach-btn" title="Attach a PDF">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5 12.7 19.8a4.5 4.5 0 0 1-6.4-6.4l8-8a3 3 0 0 1 4.3 4.3l-7.6 7.6a1.5 1.5 0 0 1-2.1-2.1l6.6-6.6"/></svg>
+        </button>
+        <input class="text-input" id="text-input" type="text" placeholder="Type a message to Nova…" autocomplete="off" />
+        <button class="mic-btn" id="mic-btn" title="Push to talk">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11Z"/></svg>
+        </button>
+        <button class="send-btn" id="send-btn" disabled title="Send message">
+          Send
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"/></svg>
+        </button>
+      </footer>
+    </section>
+
+    <!-- ==================== MEMORY VIEW ==================== -->
+    <section class="view" id="view-memory">
+      <div class="view-header">
+        <h2>What Nova remembers</h2>
+        <p>Facts extracted from your conversations — stored locally.</p>
+      </div>
+      <div class="view-scroll">
+        <div class="mem-toolbar">
+          <input class="search-input" id="mem-search" type="text" placeholder="Search memories…" autocomplete="off" />
+          <label class="auto-remember">
+            Auto-remember
+            <span class="toggle"><input type="checkbox" checked><span class="track"></span></span>
+          </label>
+        </div>
+
+        <!-- Memory list — populated from /api/memory -->
+        <div id="memory-list"></div>
+
+        <p class="mem-foot-note">Stored on your device and used only to answer you better — never shared, never used to train anything.</p>
+        <button class="ghost-btn danger" id="clear-all-memory">Clear all memory</button>
+      </div>
+    </section>
+
+    <!-- ==================== DOCUMENTS VIEW ==================== -->
+    <section class="view" id="view-documents">
+      <div class="view-header">
+        <h2>Documents</h2>
+        <p>PDFs Nova can search before it answers.</p>
+      </div>
+      <div class="view-scroll">
+        <div class="dropzone" id="dropzone">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5M5 20h14"/></svg>
+          <div>Drop a PDF here, or <button class="ghost-btn browse-btn" style="display:inline;padding:4px 10px;">Browse files</button></div>
+        </div>
+        <p style="color: var(--mist-dim); font-size: 13px; text-align: center;">Document indexing coming soon — stay tuned.</p>
+      </div>
+    </section>
+
+    <!-- ==================== AUTOMATIONS VIEW ==================== -->
+    <section class="view" id="view-automations">
+      <div class="view-header view-header-row">
+        <div>
+          <h2>Reminders & Automations</h2>
+          <p>Reminders Nova has set for you. Ask Nova to set more via chat.</p>
+        </div>
+      </div>
+      <div class="view-scroll">
+        <!-- Reminders list — populated from /api/reminders -->
+        <div id="reminders-list"></div>
+      </div>
+    </section>
+
+    <!-- ==================== AGENTS VIEW ==================== -->
+    <section class="view" id="view-agents">
+      <div class="view-header">
+        <h2>Agents & Tools</h2>
+        <p>Capabilities Nova uses to help you.</p>
+      </div>
+      <div class="view-scroll">
+
+        <div class="orchestrator-card">
+          <div class="card-title">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-1.9 5.4L21 21l-4.3-1.1a8.5 8.5 0 1 1 4.3-8.4Z"/></svg>
+            Nova — orchestrator
+          </div>
+          <p style="font-size:12.5px; color:var(--mist); margin:0;">Powered by Llama 3.3 70B via Groq. Breaks a request into smaller jobs, calls the right tools, and merges the results into one reply.</p>
+        </div>
+        <div class="agent-connector"></div>
+
+        <div class="agents-grid">
+          <div class="agent-tile">
+            <div class="agent-tile-top">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="6"/><path d="M20 20l-3.5-3.5"/></svg>
+              <span class="agent-tile-name">Web Search</span>
+            </div>
+            <p class="agent-tile-desc">Searches the web via DuckDuckGo to answer factual questions and find current info.</p>
+            <div class="agent-tile-foot"><span>tool: web_search</span><span class="status-chip ok"><span class="dot"></span>ready</span></div>
+          </div>
+
+          <div class="agent-tile">
+            <div class="agent-tile-top">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="13" r="7"/><path d="M12 9v4l2.5 1.5"/></svg>
+              <span class="agent-tile-name">Reminder</span>
+            </div>
+            <p class="agent-tile-desc">Sets timed reminders. Requires confirmation before setting (guardrailed).</p>
+            <div class="agent-tile-foot"><span>tool: set_reminder</span><span class="status-chip ok"><span class="dot"></span>ready</span></div>
+          </div>
+
+          <div class="agent-tile">
+            <div class="agent-tile-top">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+              <span class="agent-tile-name">Weather</span>
+            </div>
+            <p class="agent-tile-desc">Gets current weather for any city via wttr.in — no API key needed.</p>
+            <div class="agent-tile-foot"><span>tool: get_weather</span><span class="status-chip ok"><span class="dot"></span>ready</span></div>
+          </div>
+
+          <div class="agent-tile">
+            <div class="agent-tile-top">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+              <span class="agent-tile-name">Date & Time</span>
+            </div>
+            <p class="agent-tile-desc">Returns the current date, time, day of week, and timezone.</p>
+            <div class="agent-tile-foot"><span>tool: get_current_datetime</span><span class="status-chip ok"><span class="dot"></span>ready</span></div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- ============================================================ -->
+<!-- SETTINGS MODAL                                                -->
+<!-- ============================================================ -->
+<div class="modal-overlay" id="settings-modal">
+  <div class="modal">
+    <div class="modal-inner">
+      <button class="modal-close" id="modal-close" title="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+      <h2>Settings</h2>
+
+      <div class="modal-row">
+        <div class="modal-row-label">
+          Guardrails
+          <span>Auto-approve tool calls from the web UI</span>
+        </div>
+        <span class="toggle"><input type="checkbox" checked><span class="track"></span></span>
+      </div>
+
+      <div class="modal-row">
+        <div class="modal-row-label">
+          Auto-remember
+          <span>Extract facts from conversations automatically</span>
+        </div>
+        <span class="toggle"><input type="checkbox" checked><span class="track"></span></span>
+      </div>
+
+      <div class="modal-row">
+        <div class="modal-row-label">
+          Voice responses
+          <span>Speak responses out loud using text-to-speech</span>
+        </div>
+        <span class="toggle"><input type="checkbox" id="setting-voice" checked><span class="track"></span></span>
+      </div>
+
+      <div class="modal-row">
+        <div class="modal-row-label">
+          Backend
+          <span>Groq — Llama 3.3 70B Versatile</span>
+        </div>
+        <span class="status-chip ok"><span class="dot"></span>connected</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div class="toast-container" id="toast-container"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

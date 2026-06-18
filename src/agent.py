@@ -72,8 +72,9 @@ class AgentCore:
                     messages=messages,
                     tools=tool_defs if tool_defs else None,
                     tool_choice="auto" if tool_defs else None,
+                    parallel_tool_calls=False if tool_defs else None,
                     max_tokens=400,
-                    temperature=0.5,  # Lower temp for reliable tool use
+                    temperature=0.2,  # Lower temp for reliable tool use
                 )
             except Exception as e:
                 # ── Handle Groq's tool_use_failed error ───────────────
@@ -201,8 +202,9 @@ class AgentCore:
             "- Use set_reminder ONLY when the user asks to set a reminder or alarm.\n"
             "- For greetings, personal statements, general knowledge, or conversation, "
             "respond DIRECTLY without calling any tools.\n"
-            "- When setting reminders, call get_current_datetime first to know the current time, "
-            "then calculate the correct ISO-8601 timestamp for set_reminder.\n"
+            "- When setting reminders, you MUST call get_current_datetime first to know the current time. "
+            "Do NOT call set_reminder in the same turn. Wait for the datetime tool to return, "
+            "then calculate the correct ISO-8601 timestamp and call set_reminder in the next turn.\n"
             "- NEVER call tools speculatively or 'just in case'.\n"
         )
         if facts_block:
@@ -279,7 +281,7 @@ class AgentCore:
             #   <function=web_search[]{"query": "..."}</function>
             #   <function=web_search={"query": "..."}</function>
             match = re.search(
-                r'<function=(\w+)[^\{]*(\{.*?\})\s*</function>',
+                r'<function=(\w+)[^\{]*(\{.*?\})[^<]*</function>',
                 error_str,
             )
             if match:
