@@ -8,6 +8,12 @@ Implements the agentic reasoning loop:
   3. If text response → done
   4. If tool call → check guardrails → execute → feed result back → loop
   5. Safety brake: max N steps
+
+Phase 1 fixes:
+  - System prompt no longer duplicates "You are Nova..." in voice mode
+  - _parse_failed_tool_call uses a balanced-brace JSON extractor instead of
+    a greedy regex that breaks on nested objects
+  - step_callback parameter for live UI updates (Phase 3+)
 """
 
 import json
@@ -18,9 +24,9 @@ from src.memory import UserMemory
 from src.tools import ToolRegistry
 
 
-# Type alias for the confirmation callback supplied by main.py.
-# Signature: confirm_callback(tool_name, description) -> bool
+# Type aliases
 ConfirmCallback = Optional[Callable[[str, str], bool]]
+StepCallback = Optional[Callable[[str, str], None]]   # (event_type, detail) → None
 
 
 class AgentCore:
@@ -31,7 +37,7 @@ class AgentCore:
         groq_client,
         memory: UserMemory,
         tool_registry: ToolRegistry,
-        max_steps: int = 5,
+        max_steps: int = 10,
         model: str = "llama-3.3-70b-versatile",
     ):
         self._client = groq_client
@@ -47,6 +53,8 @@ class AgentCore:
         user_message: str,
         conversation_history: list,
         confirm_callback: ConfirmCallback = None,
+        mode: str = "chat",
+        step_callback: StepCallback = None,
     ) -> str:
         """
         Run the full reasoning loop for a single user query.
@@ -56,15 +64,23 @@ class AgentCore:
             conversation_history:  Rolling conversation history (list of dicts).
             confirm_callback:      Called when a tool requires voice confirmation.
                                    Signature: (tool_name, description) -> bool.
+            mode:                  The interaction mode ("chat" or "voice").
+            step_callback:         Optional hook called on each step for live UI.
+                                   Signature: (event_type, detail) -> None.
 
         Returns:
             The final text response to speak back to the user.
         """
-        messages = self._build_initial_messages(user_message, conversation_history)
+        messages = self._build_initial_messages(user_message, conversation_history, mode)
         tool_defs = self._registry.get_tool_definitions()
+
+        if step_callback:
+            step_callback("start", f"Processing: {user_message[:80]}")
 
         for step in range(self._max_steps):
             print(f"   🔄 Agent step {step + 1}/{self._max_steps}")
+            if step_callback:
+                step_callback("step", f"Reasoning step {step + 1}")
 
             try:
                 response = self._client.chat.completions.create(
@@ -73,20 +89,18 @@ class AgentCore:
                     tools=tool_defs if tool_defs else None,
                     tool_choice="auto" if tool_defs else None,
                     parallel_tool_calls=False if tool_defs else None,
-                    max_tokens=400,
-                    temperature=0.2,  # Lower temp for reliable tool use
+                    max_tokens=1500 if mode == "chat" else 400,
+                    temperature=0.2,
                 )
             except Exception as e:
                 # ── Handle Groq's tool_use_failed error ───────────────
-                # Groq sometimes can't parse its own model's raw function
-                # call format: <function=tool_name{"arg": "val"}</function>
-                # We parse it ourselves and execute the tool directly.
                 parsed = self._parse_failed_tool_call(e)
                 if parsed:
                     tool_name, arguments = parsed
                     print(f"   🔧 Tool call (recovered): {tool_name}({arguments})")
+                    if step_callback:
+                        step_callback("tool", f"Using tool: {tool_name}")
 
-                    # Guardrails check
                     tool = self._registry.get(tool_name)
                     if tool and tool.requires_confirmation and confirm_callback:
                         description = self._describe_tool_call(tool_name, arguments)
@@ -101,7 +115,6 @@ class AgentCore:
                         result = self._registry.execute(tool_name, arguments)
                         print(f"   ✅ Tool result: {result[:200]}")
 
-                    # Synthesize proper message history so the LLM can see the result
                     synth_id = f"call_recovered_{step}"
                     messages.append({
                         "role": "assistant",
@@ -120,7 +133,7 @@ class AgentCore:
                         "tool_call_id": synth_id,
                         "content": result,
                     })
-                    continue  # next iteration — LLM will see the tool result
+                    continue
 
                 print(f"   ❌ LLM call failed: {e}")
                 return "Something went wrong while I was thinking. Please try again."
@@ -132,10 +145,11 @@ class AgentCore:
             if not assistant_msg.tool_calls:
                 final_text = assistant_msg.content or ""
                 print(f"   ✅ Agent done (text response)")
+                if step_callback:
+                    step_callback("done", "Response ready")
                 return final_text.strip()
 
             # ── Case 2: LLM wants to call tool(s) ────────────────────
-            # Add the assistant's message (with tool_calls) to history
             messages.append(self._serialize_assistant_message(assistant_msg))
 
             for tool_call in assistant_msg.tool_calls:
@@ -148,11 +162,12 @@ class AgentCore:
                     arguments = {}
 
                 print(f"   🔧 Tool call: {tool_name}({arguments})")
+                if step_callback:
+                    step_callback("tool", f"Using tool: {tool_name}")
 
                 # ── Guardrails: check if tool requires confirmation ───
                 tool = self._registry.get(tool_name)
                 if tool and tool.requires_confirmation and confirm_callback:
-                    # Build a human-readable description of what we're about to do
                     description = self._describe_tool_call(tool_name, arguments)
                     confirmed = confirm_callback(tool_name, description)
                     if not confirmed:
@@ -165,11 +180,9 @@ class AgentCore:
                         result = self._registry.execute(tool_name, arguments)
                         print(f"   ✅ Tool result: {result[:200]}")
                 else:
-                    # No confirmation needed — execute directly
                     result = self._registry.execute(tool_name, arguments)
                     print(f"   ✅ Tool result: {result[:200]}")
 
-                # Feed tool result back to the LLM
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -178,6 +191,8 @@ class AgentCore:
 
         # ── Safety brake: max steps exceeded ──────────────────────────
         print(f"   ⚠️ Agent hit max steps ({self._max_steps})")
+        if step_callback:
+            step_callback("error", "Max steps exceeded")
         return (
             "I've been working on this for a while but couldn't finish. "
             "Could you try rephrasing your request?"
@@ -186,38 +201,47 @@ class AgentCore:
     # ── Private helpers ───────────────────────────────────────────────────
 
     def _build_initial_messages(
-        self, user_message: str, conversation_history: list
+        self, user_message: str, conversation_history: list, mode: str = "chat"
     ) -> list:
         """Assemble the full message list for the first LLM call."""
-        # System prompt with memory facts
         facts_block = self._memory.get_facts_prompt()
+
+        # BUG FIX #5: voice mode no longer re-declares "You are Nova..." — it
+        # is already in the shared system header below.
+        if mode == "voice":
+            length_hint = "Be concise — keep replies to 1-3 sentences since responses are spoken aloud."
+        else:
+            length_hint = (
+                "For anything covered by your training — general knowledge, explanations, "
+                "coding, math, creative writing — answer fully and directly WITHOUT calling tools. "
+                "Tools are optional helpers for live data (web, weather, reminders, PDFs, browser)."
+            )
+
         system_content = (
-            "You are Nova, a helpful voice assistant with access to tools. "
-            "Be concise — keep replies to 1-3 sentences since responses are spoken aloud.\n\n"
+            "You are Nova, a helpful AI assistant with access to powerful tools. "
+            f"{length_hint}\n\n"
             "TOOL USAGE RULES:\n"
             "- ONLY call a tool when the user EXPLICITLY asks for something that requires it.\n"
             "- Use get_current_datetime ONLY when the user asks for the time/date.\n"
             "- Use web_search ONLY when the user asks to search or asks about current events/news.\n"
             "- Use get_weather ONLY when the user asks about weather.\n"
             "- Use set_reminder ONLY when the user asks to set a reminder or alarm.\n"
-            "- For greetings, personal statements, general knowledge, or conversation, "
-            "respond DIRECTLY without calling any tools.\n"
-            "- When setting reminders, you MUST call get_current_datetime first to know the current time. "
-            "Do NOT call set_reminder in the same turn. Wait for the datetime tool to return, "
-            "then calculate the correct ISO-8601 timestamp and call set_reminder in the next turn.\n"
+            "- Use search_documents when the user asks about an uploaded PDF document.\n"
+            "- Use browser_navigate / browser_search_and_book for web automation tasks.\n"
+            "- Use draft_email / send_email for email tasks.\n"
+            "- Use create_calendar_event for scheduling.\n"
+            "- For greetings, personal statements, general knowledge, respond DIRECTLY without tools.\n"
+            "- When setting reminders, call get_current_datetime FIRST, THEN set_reminder.\n"
             "- NEVER call tools speculatively or 'just in case'.\n"
+            "- For irreversible actions (book, send, delete), ALWAYS explain what you will do "
+            "before calling the tool — the guardrail system will ask the user to confirm.\n"
         )
         if facts_block:
             system_content += "\n" + facts_block
 
         messages = [{"role": "system", "content": system_content}]
-
-        # Add conversation history
         messages.extend(conversation_history)
-
-        # Add the current user message
         messages.append({"role": "user", "content": user_message})
-
         return messages
 
     @staticmethod
@@ -253,44 +277,67 @@ class AgentCore:
                 time_str = dt.strftime("%I:%M %p")
             except (ValueError, ImportError):
                 pass
-            return f"set a reminder at {time_str} to {msg}"
+            return f"set a reminder at {time_str} to '{msg}'"
+
+        if tool_name == "send_email":
+            to = arguments.get("to", "?")
+            subject = arguments.get("subject", "?")
+            return f"send an email to {to} with subject '{subject}'"
+
+        if tool_name == "browser_search_and_book":
+            site = arguments.get("site", "the website")
+            task = arguments.get("task_type", "book")
+            return f"{task} on {site}"
+
+        if tool_name == "create_calendar_event":
+            title = arguments.get("title", "an event")
+            start = arguments.get("start", "?")
+            return f"create a calendar event '{title}' at {start}"
+
+        if tool_name == "delete_calendar_event":
+            return f"delete calendar event {arguments.get('event_id', '?')}"
 
         # Generic fallback
         args_str = ", ".join(f"{k}={v}" for k, v in arguments.items())
-        return f"use the {tool_name} tool with {args_str}" if args_str else f"use the {tool_name} tool"
+        return f"use {tool_name}({args_str})" if args_str else f"use {tool_name}"
 
     @staticmethod
     def _parse_failed_tool_call(error) -> tuple:
         """
         Extract tool name and args from Groq's tool_use_failed error.
 
-        Groq sometimes returns:
-          <function=web_search{"query": "..."}</function>
-        We parse that into ("web_search", {"query": "..."}).
-
-        Returns (tool_name, arguments) or None.
+        BUG FIX #7: Use a balanced-brace JSON extractor instead of .*? which
+        fails on nested objects like {"details": {"from": "DEL", "to": "BOM"}}.
         """
         try:
             error_str = str(error)
             if "tool_use_failed" not in error_str:
                 return None
 
-            # Extract the failed_generation content
-            # Handles all formats:
-            #   <function=web_search{"query": "..."}</function>
-            #   <function=web_search[]{"query": "..."}</function>
-            #   <function=web_search={"query": "..."}</function>
-            match = re.search(
-                r'<function=(\w+)[^\{]*(\{.*?\})[^<]*</function>',
-                error_str,
-            )
-            if match:
-                tool_name = match.group(1)
-                arguments = json.loads(match.group(2))
-                if not isinstance(arguments, dict):
-                    arguments = {}
-                return tool_name, arguments
+            # 1. Extract tool name
+            name_match = re.search(r'<function=(\w+)', error_str)
+            if not name_match:
+                return None
+            tool_name = name_match.group(1)
+
+            # 2. Find first '{' after the tool name and walk forward counting braces
+            start_idx = error_str.find('{', name_match.end())
+            if start_idx == -1:
+                return None
+
+            depth = 0
+            for i, ch in enumerate(error_str[start_idx:], start_idx):
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        json_str = error_str[start_idx:i + 1]
+                        arguments = json.loads(json_str)
+                        if not isinstance(arguments, dict):
+                            arguments = {}
+                        return tool_name, arguments
+
         except Exception:
             pass
         return None
-

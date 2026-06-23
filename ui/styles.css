@@ -766,3 +766,68 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
   padding: 1px 5px; border-radius: 4px; color: var(--mist-dim);
   margin-left: 4px;
 }
+
+/* ============================= NEW PHASE 1-6 ADDITIONS ============================= */
+
+/* Capability chips on welcome screen */
+.capability-chips {
+  display: flex; flex-wrap: wrap; gap: 7px; justify-content: center; margin-top: 16px;
+}
+.cap-chip {
+  font-size: 12px; color: var(--mist);
+  border: 1px solid var(--line); background: var(--slate);
+  padding: 5px 11px; border-radius: 100px;
+  transition: border-color var(--transition-fast), color var(--transition-fast), transform var(--transition-fast);
+}
+.cap-chip:hover { border-color: var(--signal); color: var(--paper); transform: translateY(-1px); }
+
+/* Markdown body rendered inside chat bubbles (Phase 1 bug fix) */
+.markdown-body { color: var(--paper); font-size: 14px; line-height: 1.65; }
+.markdown-body p { margin: 0 0 8px; }
+.markdown-body p:last-child { margin-bottom: 0; }
+.markdown-body ul, .markdown-body ol { padding-left: 20px; margin: 6px 0; }
+.markdown-body li { margin-bottom: 3px; }
+.markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 {
+  font-family: 'Fraunces', serif; font-weight: 500; margin: 10px 0 5px; color: var(--paper);
+}
+.markdown-body h1 { font-size: 19px; }
+.markdown-body h2 { font-size: 16px; }
+.markdown-body h3 { font-size: 14.5px; }
+.markdown-body code {
+  font-family: 'IBM Plex Mono', monospace; font-size: 12.5px;
+  background: var(--slate-2); border: 1px solid var(--line);
+  padding: 1px 5px; border-radius: 5px; color: var(--signal);
+}
+.markdown-body pre {
+  background: var(--slate-2); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); padding: 12px 14px; overflow-x: auto; margin: 8px 0;
+}
+.markdown-body pre code { background: none; border: none; padding: 0; color: var(--paper); }
+.markdown-body blockquote {
+  border-left: 3px solid var(--ember); margin: 8px 0; padding: 4px 12px;
+  color: var(--mist); font-style: italic;
+}
+.markdown-body a { color: var(--signal); text-decoration: underline; text-underline-offset: 2px; }
+.markdown-body strong { color: var(--paper); font-weight: 600; }
+.markdown-body em { color: var(--mist); font-style: italic; }
+.markdown-body table { border-collapse: collapse; width: 100%; margin: 8px 0; }
+.markdown-body th, .markdown-body td { border: 1px solid var(--line); padding: 6px 10px; font-size: 13px; }
+.markdown-body th { background: var(--slate-2); font-weight: 600; }
+.markdown-body hr { border: none; border-top: 1px solid var(--line); margin: 12px 0; }
+
+/* Confirm modal (Phase 3 guardrail) */
+.confirm-modal-inner {
+  max-width: 380px; text-align: center;
+}
+.confirm-icon {
+  width: 48px; height: 48px; border-radius: 50%; margin: 0 auto 12px;
+  background: var(--ember-dim); border: 1px solid rgba(232,163,61,0.3);
+  display: flex; align-items: center; justify-content: center;
+}
+.confirm-icon svg { width: 22px; height: 22px; color: var(--ember); }
+
+/* Automations section label */
+.auto-section-label {
+  font-family: 'IBM Plex Mono', monospace; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--mist-dim); margin: 8px 0 10px;
+}

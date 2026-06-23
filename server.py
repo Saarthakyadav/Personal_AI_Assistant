@@ -4,11 +4,23 @@ Nova Web Server — FastAPI entry point for the Nova UI.
 
 Reuses the same AgentCore, UserMemory, ToolRegistry, and ReminderService
 as main.py, but serves them over HTTP instead of voice.
+
+Phase 1: Bug fixes (turn_count, thread-safe tool tracking, system prompt)
+Phase 3: Browser/email/calendar tools + /api/confirm + guardrail modal
+Phase 4: RAG PDF upload + /api/documents
+Phase 5: Multi-agent /api/workflow + WebSocket streaming
+Phase 6: Background scheduler /api/tasks
 """
 
 import sys
 import io
 import os
+import json
+import asyncio
+import threading
+import uuid
+from contextlib import contextmanager
+from typing import Optional, List, Dict, Any
 
 # Force UTF-8 output on Windows
 if sys.stdout.encoding != 'utf-8':
@@ -16,13 +28,11 @@ if sys.stdout.encoding != 'utf-8':
 if sys.stderr.encoding != 'utf-8':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
-import threading
-import json
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -62,6 +72,8 @@ for tool in ALL_BUILTIN_TOOLS:
 def _web_speak(text: str):
     """No-op TTS for web mode — the UI displays text directly."""
     print(f"🔔 Reminder (web): {text}")
+    # Broadcast reminder to all connected WebSocket clients
+    _ws_broadcast_sync({"type": "reminder", "message": text})
 
 reminder_service = ReminderService(
     filepath=os.path.join(os.path.dirname(__file__), "reminders.json"),
@@ -70,30 +82,153 @@ reminder_service = ReminderService(
 reminder_tool = create_reminder_tool(reminder_service)
 tool_registry.register(reminder_tool)
 reminder_service.start()
-print(f"✅ Tools ready: {tool_registry.tool_names}")
+
+# ── Optional Phase 3: Browser / Email / Calendar tools ───────────────────────
+try:
+    from src.tools.browser import BROWSER_TOOLS
+    for t in BROWSER_TOOLS:
+        tool_registry.register(t)
+    print(f"✅ Browser tools registered: {[t.name for t in BROWSER_TOOLS]}")
+except ImportError as e:
+    print(f"⚠️  Browser tools not available (pip install playwright): {e}")
+
+try:
+    from src.tools.email_tool import EMAIL_TOOLS
+    for t in EMAIL_TOOLS:
+        tool_registry.register(t)
+    print(f"✅ Email tools registered: {[t.name for t in EMAIL_TOOLS]}")
+except ImportError as e:
+    print(f"⚠️  Email tools not available: {e}")
+
+try:
+    from src.tools.calendar_tool import CALENDAR_TOOLS
+    for t in CALENDAR_TOOLS:
+        tool_registry.register(t)
+    print(f"✅ Calendar tools registered: {[t.name for t in CALENDAR_TOOLS]}")
+except ImportError as e:
+    print(f"⚠️  Calendar tools not available: {e}")
+
+# ── Optional Phase 4: RAG tools ───────────────────────────────────────────────
+rag_retriever = None
+try:
+    from src.rag.retriever import RAGRetriever
+    from src.tools.rag_tool import create_rag_tool
+    rag_retriever = RAGRetriever()
+    rag_tool = create_rag_tool(rag_retriever)
+    tool_registry.register(rag_tool)
+    # Also register the list_documents companion tool
+    if hasattr(rag_tool, '_list_companion'):
+        tool_registry.register(rag_tool._list_companion)
+    print("✅ RAG tool registered")
+except ImportError as e:
+    print(f"⚠️  RAG not available (pip install chromadb sentence-transformers pymupdf): {e}")
+except Exception as e:
+    print(f"⚠️  RAG init failed: {e}")
+
+# ── Optional Phase 6: Task Scheduler ─────────────────────────────────────────
+task_scheduler = None
+try:
+    from src.scheduler import TaskScheduler
+    from src.tools.automation import create_automation_tools
+    task_scheduler = TaskScheduler()
+    task_scheduler.start()
+    automation_tools = create_automation_tools(task_scheduler)
+    for t in automation_tools:
+        tool_registry.register(t)
+    print("✅ Scheduler + automation tools registered")
+except ImportError as e:
+    print(f"⚠️  Scheduler not available (pip install apscheduler): {e}")
+except Exception as e:
+    print(f"⚠️  Scheduler init failed: {e}")
+
+print(f"✅ All tools ready: {tool_registry.tool_names}")
 
 # Agent core
 agent = AgentCore(
     groq_client=client,
     memory=memory,
     tool_registry=tool_registry,
-    max_steps=5,
+    max_steps=10,
 )
 print("✅ Agent core ready")
 
-# Conversation state
+# ── Optional Phase 5: Orchestrator ────────────────────────────────────────────
+orchestrator = None
+try:
+    from src.orchestrator import Orchestrator
+    orchestrator = Orchestrator(groq_client=client, tool_registry=tool_registry, memory=memory)
+    print("✅ Multi-agent orchestrator ready")
+except ImportError as e:
+    print(f"⚠️  Orchestrator not available: {e}")
+
+# ── Conversation state ────────────────────────────────────────────────────────
 MAX_HISTORY_TURNS = 10
 conversation_history: list = []
 turn_count = 0
 _chat_lock = threading.Lock()
 
+# ── Pending confirmations (guardrail modal) ───────────────────────────────────
+# Maps request_id → threading.Event + result dict
+_pending_confirmations: Dict[str, dict] = {}
+_confirm_lock = threading.Lock()
 
-# ── FastAPI app ──────────────────────────────────────────────────────────────
+# ── WebSocket clients ─────────────────────────────────────────────────────────
+_ws_clients: List[WebSocket] = []
+_ws_lock = threading.Lock()
 
-app = FastAPI(title="Nova Assistant", version="1.0")
+
+def _ws_broadcast_sync(data: dict):
+    """Thread-safe broadcast to all connected WebSocket clients."""
+    with _ws_lock:
+        clients = list(_ws_clients)
+    for ws in clients:
+        try:
+            # Schedule in the event loop
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.run_coroutine_threadsafe(ws.send_json(data), loop)
+        except Exception:
+            pass
 
 
-# ── Request / Response models ────────────────────────────────────────────────
+# ── Thread-safe tool tracking context manager ─────────────────────────────────
+@contextmanager
+def track_tools(registry: ToolRegistry):
+    """
+    Context manager that wraps the registry's execute() to collect tool names
+    used during the request. Thread-safe — uses a local list, not a global.
+    """
+    tools_used: List[str] = []
+    original_execute = registry.__class__.execute
+
+    def patched_execute(self, tool_name: str, arguments: dict) -> str:
+        tools_used.append(tool_name)
+        return original_execute(self, tool_name, arguments)
+
+    # Bind a per-instance override (avoids mutating the class method)
+    import types
+    registry.execute = types.MethodType(patched_execute, registry)
+    try:
+        yield tools_used
+    finally:
+        # Restore: delete the instance attribute so the class method is used again
+        try:
+            del registry.execute
+        except AttributeError:
+            pass
+
+
+# ── FastAPI app ───────────────────────────────────────────────────────────────
+app = FastAPI(title="Nova Assistant", version="2.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ── Request / Response models ─────────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
     message: str
@@ -102,6 +237,7 @@ class ChatResponse(BaseModel):
     response: str
     tools_used: List[str]
     turn: int
+    requires_confirmation: Optional[dict] = None
 
 class VoiceResponse(BaseModel):
     transcript: str
@@ -135,8 +271,22 @@ class HistoryResponse(BaseModel):
     messages: List[HistoryMessage]
     turn: int
 
+class ConfirmRequest(BaseModel):
+    request_id: str
+    confirmed: bool
 
-# ── Chat endpoint ────────────────────────────────────────────────────────────
+class WorkflowRequest(BaseModel):
+    goal: str
+    agents: Optional[List[str]] = None
+
+class TaskCreateRequest(BaseModel):
+    name: str
+    goal: str
+    trigger: str        # "interval", "cron", "date"
+    trigger_args: dict  # e.g. {"minutes": 30} or {"hour": 9, "minute": 0}
+
+
+# ── Chat endpoint ─────────────────────────────────────────────────────────────
 
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
@@ -148,36 +298,55 @@ def chat(req: ChatRequest):
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
     with _chat_lock:
+        # BUG FIX #1: increment only once per request
         turn_count += 1
+        current_turn = turn_count
 
-        # Track which tools the agent uses during this request
-        tools_used = []
-        original_execute = tool_registry.execute
+        # BUG FIX #2: thread-safe tool tracking via context manager
+        with track_tools(tool_registry) as tools_used:
+            # Phase 3: real confirmation callback — creates a pending confirmation
+            # and waits up to 30s for the frontend to respond via /api/confirm
+            confirmation_result = {}
 
-        def tracking_execute(tool_name: str, arguments: dict) -> str:
-            tools_used.append(tool_name)
-            return original_execute(tool_name, arguments)
-
-        # Temporarily patch execute to track tool usage
-        tool_registry.execute = tracking_execute
-
-        try:
-            # Auto-approve guardrailed tools from web UI
             def web_confirm(tool_name: str, description: str) -> bool:
-                print(f"   🛡️ Auto-approved (web): {tool_name} — {description}")
-                return True
+                req_id = str(uuid.uuid4())
+                evt = threading.Event()
+                with _confirm_lock:
+                    _pending_confirmations[req_id] = {"event": evt, "confirmed": False}
 
-            response_text = agent.run(
-                user_message=message,
-                conversation_history=conversation_history,
-                confirm_callback=web_confirm,
-            )
-        except Exception as e:
-            print(f"❌ Agent error: {e}")
-            raise HTTPException(status_code=500, detail=f"Agent error: {str(e)}")
-        finally:
-            # Restore original execute
-            tool_registry.execute = original_execute
+                # Push confirmation request to UI via WebSocket
+                _ws_broadcast_sync({
+                    "type": "confirmation_required",
+                    "request_id": req_id,
+                    "tool_name": tool_name,
+                    "description": description,
+                })
+                confirmation_result["request_id"] = req_id
+                confirmation_result["tool_name"] = tool_name
+                confirmation_result["description"] = description
+
+                print(f"   🛡️ Awaiting UI confirmation for: {tool_name} — {description}")
+                granted = evt.wait(timeout=30)  # 30s timeout
+
+                with _confirm_lock:
+                    result = _pending_confirmations.pop(req_id, {}).get("confirmed", False)
+
+                if not granted:
+                    print(f"   ⏱️  Confirmation timed out for {tool_name} — denying")
+                    return False
+                print(f"   {'✅' if result else '🚫'} Confirmation {'granted' if result else 'denied'} for {tool_name}")
+                return result
+
+            try:
+                response_text = agent.run(
+                    user_message=message,
+                    conversation_history=conversation_history,
+                    confirm_callback=web_confirm,
+                    mode="chat",
+                )
+            except Exception as e:
+                print(f"❌ Agent error: {e}")
+                raise HTTPException(status_code=500, detail=f"Agent error: {str(e)}")
 
         # Update conversation history
         conversation_history.append({"role": "user", "content": message})
@@ -186,8 +355,6 @@ def chat(req: ChatRequest):
         # Trim history to window
         if len(conversation_history) > MAX_HISTORY_TURNS * 2:
             del conversation_history[:2]
-
-        turn_count += 1
 
         # Extract user facts in background
         threading.Thread(
@@ -199,11 +366,12 @@ def chat(req: ChatRequest):
     return ChatResponse(
         response=response_text,
         tools_used=tools_used,
-        turn=turn_count,
+        turn=current_turn,
+        requires_confirmation=confirmation_result if confirmation_result else None,
     )
 
 
-# ── Voice endpoint ───────────────────────────────────────────────────────────
+# ── Voice endpoint ────────────────────────────────────────────────────────────
 
 @app.post("/api/voice", response_model=VoiceResponse)
 async def voice_chat(file: UploadFile = File(...)):
@@ -211,11 +379,11 @@ async def voice_chat(file: UploadFile = File(...)):
     global turn_count
 
     import tempfile
-    
+
     suffix = os.path.splitext(file.filename)[1] if file.filename else ".webm"
     if not suffix:
         suffix = ".webm"
-        
+
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     temp_path = temp_file.name
     try:
@@ -231,13 +399,17 @@ async def voice_chat(file: UploadFile = File(...)):
                 language="en",
                 response_format="text",
             )
-        
+
         transcript_text = transcript.strip()
         print(f"   📝 Transcribed text: '{transcript_text}'")
 
-        if not transcript_text:
-            raise HTTPException(status_code=400, detail="Could not transcribe audio or audio was empty")
+        hallucinations = {"you", "you you you", "thank you", "thank you.", "thanks for watching", "thank you for watching"}
+        if not transcript_text or transcript_text.lower().strip() in hallucinations:
+            print("   ⚠️ Empty transcription or detected silent hallucination pattern.")
+            raise HTTPException(status_code=400, detail="Could not detect speech, please try again")
 
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"❌ Transcription/Upload error: {e}")
         raise HTTPException(status_code=500, detail=f"Transcription error: {str(e)}")
@@ -248,40 +420,31 @@ async def voice_chat(file: UploadFile = File(...)):
             pass
 
     with _chat_lock:
+        # BUG FIX #1: increment only once
         turn_count += 1
+        current_turn = turn_count
 
-        tools_used = []
-        original_execute = tool_registry.execute
-
-        def tracking_execute(tool_name: str, arguments: dict) -> str:
-            tools_used.append(tool_name)
-            return original_execute(tool_name, arguments)
-
-        tool_registry.execute = tracking_execute
-
-        try:
-            def web_confirm(tool_name: str, description: str) -> bool:
-                print(f"   🛡️ Auto-approved (web): {tool_name} — {description}")
+        with track_tools(tool_registry) as tools_used:
+            def web_confirm_voice(tool_name: str, description: str) -> bool:
+                print(f"   🛡️ Auto-approved (voice): {tool_name} — {description}")
                 return True
 
-            response_text = agent.run(
-                user_message=transcript_text,
-                conversation_history=conversation_history,
-                confirm_callback=web_confirm,
-            )
-        except Exception as e:
-            print(f"❌ Agent error: {e}")
-            raise HTTPException(status_code=500, detail=f"Agent error: {str(e)}")
-        finally:
-            tool_registry.execute = original_execute
+            try:
+                response_text = agent.run(
+                    user_message=transcript_text,
+                    conversation_history=conversation_history,
+                    confirm_callback=web_confirm_voice,
+                    mode="voice",
+                )
+            except Exception as e:
+                print(f"❌ Agent error: {e}")
+                raise HTTPException(status_code=500, detail=f"Agent error: {str(e)}")
 
         conversation_history.append({"role": "user", "content": transcript_text})
         conversation_history.append({"role": "assistant", "content": response_text})
 
         if len(conversation_history) > MAX_HISTORY_TURNS * 2:
             del conversation_history[:2]
-
-        turn_count += 1
 
         threading.Thread(
             target=memory.extract_and_store,
@@ -293,26 +456,35 @@ async def voice_chat(file: UploadFile = File(...)):
         transcript=transcript_text,
         response=response_text,
         tools_used=tools_used,
-        turn=turn_count,
+        turn=current_turn,
     )
 
 
-# ── Memory endpoints ─────────────────────────────────────────────────────────
+# ── Confirmation endpoint (guardrail modal) ───────────────────────────────────
+
+@app.post("/api/confirm")
+def confirm_tool(req: ConfirmRequest):
+    """Frontend sends user's yes/no decision for a guardrailed tool call."""
+    with _confirm_lock:
+        pending = _pending_confirmations.get(req.request_id)
+    if not pending:
+        raise HTTPException(status_code=404, detail="Confirmation request not found or expired")
+    pending["confirmed"] = req.confirmed
+    pending["event"].set()
+    return {"status": "ok", "confirmed": req.confirmed}
+
+
+# ── Memory endpoints ──────────────────────────────────────────────────────────
 
 @app.get("/api/memory", response_model=MemoryResponse)
 def get_memory():
-    """Get all stored user facts."""
     with memory._lock:
-        facts = [
-            MemoryFact(fact=f, index=i)
-            for i, f in enumerate(memory._facts)
-        ]
+        facts = [MemoryFact(fact=f, index=i) for i, f in enumerate(memory._facts)]
     return MemoryResponse(facts=facts, count=len(facts))
 
 
 @app.delete("/api/memory")
 def clear_memory():
-    """Clear all memory facts."""
     with memory._lock:
         count = len(memory._facts)
         memory._facts.clear()
@@ -322,7 +494,6 @@ def clear_memory():
 
 @app.delete("/api/memory/{index}")
 def delete_memory(index: int):
-    """Delete a single memory fact by index."""
     with memory._lock:
         if index < 0 or index >= len(memory._facts):
             raise HTTPException(status_code=404, detail="Memory index out of range")
@@ -331,11 +502,10 @@ def delete_memory(index: int):
     return {"deleted": removed, "status": "ok"}
 
 
-# ── Reminders endpoint ───────────────────────────────────────────────────────
+# ── Reminders endpoint ────────────────────────────────────────────────────────
 
 @app.get("/api/reminders", response_model=RemindersResponse)
 def get_reminders():
-    """Get all reminders."""
     with reminder_service._lock:
         items = [
             ReminderItem(
@@ -354,7 +524,6 @@ def get_reminders():
 
 @app.get("/api/history", response_model=HistoryResponse)
 def get_history():
-    """Get conversation history."""
     messages = [
         HistoryMessage(role=m["role"], content=m["content"])
         for m in conversation_history
@@ -364,7 +533,6 @@ def get_history():
 
 @app.delete("/api/history")
 def clear_history():
-    """Clear conversation history."""
     global turn_count
     with _chat_lock:
         conversation_history.clear()
@@ -372,17 +540,157 @@ def clear_history():
     return {"status": "ok"}
 
 
+# ── Documents / RAG endpoints ─────────────────────────────────────────────────
+
+@app.post("/api/upload")
+async def upload_document(file: UploadFile = File(...)):
+    """Upload a PDF and index it for RAG search."""
+    if rag_retriever is None:
+        raise HTTPException(status_code=503, detail="RAG not available — install chromadb, sentence-transformers, pymupdf")
+
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+
+    import tempfile
+    contents = await file.read()
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    tmp.write(contents)
+    tmp.close()
+
+    try:
+        doc_id, chunk_count = rag_retriever.index_pdf(tmp.name, filename=file.filename)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF indexing failed: {str(e)}")
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+
+    return {"doc_id": doc_id, "filename": file.filename, "chunks": chunk_count, "status": "indexed"}
+
+
+@app.get("/api/documents")
+def list_documents():
+    """List all indexed documents."""
+    if rag_retriever is None:
+        return {"documents": [], "available": False}
+    try:
+        docs = rag_retriever.list_documents()
+        return {"documents": docs, "available": True}
+    except Exception as e:
+        return {"documents": [], "available": True, "error": str(e)}
+
+
+@app.delete("/api/documents/{doc_id}")
+def delete_document(doc_id: str):
+    """Remove a document from the index."""
+    if rag_retriever is None:
+        raise HTTPException(status_code=503, detail="RAG not available")
+    try:
+        rag_retriever.delete_document(doc_id)
+        return {"status": "ok", "deleted": doc_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Multi-agent Workflow endpoint ─────────────────────────────────────────────
+
+@app.post("/api/workflow")
+def run_workflow(req: WorkflowRequest):
+    """Run a multi-agent workflow for a complex goal."""
+    if orchestrator is None:
+        # Fall back to single agent
+        with _chat_lock:
+            global turn_count
+            turn_count += 1
+            current_turn = turn_count
+            with track_tools(tool_registry) as tools_used:
+                try:
+                    response_text = agent.run(
+                        user_message=req.goal,
+                        conversation_history=conversation_history,
+                        confirm_callback=lambda n, d: True,
+                        mode="chat",
+                    )
+                except Exception as e:
+                    raise HTTPException(status_code=500, detail=str(e))
+        return {"result": response_text, "tools_used": tools_used, "turn": current_turn, "agents_used": ["nova"]}
+
+    try:
+        result = orchestrator.run_workflow(req.goal, agents=req.agents)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── WebSocket for live updates ────────────────────────────────────────────────
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    with _ws_lock:
+        _ws_clients.append(websocket)
+    try:
+        while True:
+            # Keep alive — listen for any incoming messages
+            data = await websocket.receive_text()
+            # Handle ping
+            if data == "ping":
+                await websocket.send_json({"type": "pong"})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        with _ws_lock:
+            if websocket in _ws_clients:
+                _ws_clients.remove(websocket)
+
+
+# ── Scheduled Tasks endpoints ─────────────────────────────────────────────────
+
+@app.get("/api/tasks")
+def list_tasks():
+    if task_scheduler is None:
+        return {"tasks": [], "available": False}
+    return {"tasks": task_scheduler.list_tasks(), "available": True}
+
+
+@app.post("/api/tasks")
+def create_task(req: TaskCreateRequest):
+    if task_scheduler is None:
+        raise HTTPException(status_code=503, detail="Scheduler not available — install apscheduler")
+    try:
+        task_id = task_scheduler.schedule_task(
+            name=req.name,
+            goal=req.goal,
+            trigger=req.trigger,
+            trigger_args=req.trigger_args,
+            agent=agent,
+            conversation_history=conversation_history,
+        )
+        return {"task_id": task_id, "status": "scheduled"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/tasks/{task_id}")
+def cancel_task(task_id: str):
+    if task_scheduler is None:
+        raise HTTPException(status_code=503, detail="Scheduler not available")
+    ok = task_scheduler.cancel_task(task_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"status": "cancelled", "task_id": task_id}
+
+
 # ── Serve the UI ──────────────────────────────────────────────────────────────
 
 ui_dir = os.path.join(os.path.dirname(__file__), "ui")
-
-# Serve static files (CSS, JS)
 app.mount("/static", StaticFiles(directory=ui_dir), name="static")
 
 
 @app.get("/")
 def serve_ui():
-    """Serve the Nova UI."""
     return FileResponse(os.path.join(ui_dir, "index.html"))
 
 
