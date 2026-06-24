@@ -183,12 +183,24 @@ class TaskScheduler:
         goal = task["goal"]
         print(f"\n⏰ Running scheduled task '{task['name']}': {goal[:60]}")
 
+        BLOCKED_TOOLS = {"send_email", "browser_search_and_book", "delete_calendar_event", "cancel_task"}
+
+        def _safe_background_confirm(tool_name: str, description: str) -> Any:
+            if tool_name in BLOCKED_TOOLS:
+                print(f"   ⚠️  Blocked irreversible tool '{tool_name}' in background task '{task['name']}'")
+                return json.dumps({
+                    "status": "blocked",
+                    "reason": "Background tasks cannot execute irreversible actions"
+                })
+            print(f"   🛡️ Background task auto-approved: {tool_name}")
+            return True
+
         if self._agent:
             try:
                 result = self._agent.run(
                     user_message=goal,
                     conversation_history=[],
-                    confirm_callback=lambda n, d: True,  # auto-approve in background
+                    confirm_callback=_safe_background_confirm,
                     mode="chat",
                 )
                 print(f"   ✅ Task result: {result[:200]}")

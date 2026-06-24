@@ -28,9 +28,41 @@ from typing import Optional, List
 from src.tools import Tool
 
 
-# ── Draft store (in-memory, keyed by draft_id) ───────────────────────────────
+# ── Draft store (file-backed, persists across restarts) ───────────────────────
+_DRAFTS_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "email_drafts.json"))
 _drafts: dict = {}
 _draft_lock = threading.Lock()
+
+
+def _load_drafts():
+    """Load drafts from disk."""
+    global _drafts
+    if not os.path.exists(_DRAFTS_FILE):
+        _drafts = {}
+        return
+    try:
+        with open(_DRAFTS_FILE, "r", encoding="utf-8") as f:
+            _drafts = json.load(f).get("drafts", {})
+    except Exception:
+        _drafts = {}
+
+
+def _save_drafts_unlocked():
+    """Persist drafts to disk. Caller must hold _draft_lock."""
+    try:
+        from datetime import datetime as _dt
+        data = {"drafts": _drafts, "updated_at": _dt.now().isoformat()}
+        parent = os.path.dirname(_DRAFTS_FILE)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(_DRAFTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"   ⚠️ Could not save drafts: {e}")
+
+
+# Load persisted drafts on import
+_load_drafts()
 
 
 # ── 1. draft_email ────────────────────────────────────────────────────────────
@@ -49,6 +81,7 @@ def _draft_email(to: str, subject: str, body: str, cc: Optional[str] = None) -> 
     }
     with _draft_lock:
         _drafts[draft_id] = draft
+        _save_drafts_unlocked()
 
     return json.dumps({
         "draft_id": draft_id,
@@ -146,6 +179,7 @@ def _send_email(draft_id: Optional[str] = None, to: Optional[str] = None,
         if draft_id:
             with _draft_lock:
                 _drafts.pop(draft_id, None)
+                _save_drafts_unlocked()
 
         return json.dumps({
             "status": "sent",

@@ -65,6 +65,7 @@ print(f"✅ User memory ready ({memory.fact_count} fact(s) loaded)")
 
 # Tool registry
 tool_registry = ToolRegistry()
+mcp_adapter = None
 for tool in ALL_BUILTIN_TOOLS:
     tool_registry.register(tool)
 
@@ -81,9 +82,9 @@ reminder_service = ReminderService(
 )
 reminder_tool = create_reminder_tool(reminder_service)
 tool_registry.register(reminder_tool)
-reminder_service.start()
+# reminder_service.start() — moved to lifespan startup to prevent race conditions
 
-# ── Optional Phase 3: Browser / Email / Calendar tools ───────────────────────
+# ── Optional Phase 3: Browser / Email / Calendar / General tools & MCP ────────
 try:
     from src.tools.browser import BROWSER_TOOLS
     for t in BROWSER_TOOLS:
@@ -93,20 +94,26 @@ except ImportError as e:
     print(f"⚠️  Browser tools not available (pip install playwright): {e}")
 
 try:
-    from src.tools.email_tool import EMAIL_TOOLS
-    for t in EMAIL_TOOLS:
+    from src.tools.general_tools import GENERAL_TOOLS
+    for t in GENERAL_TOOLS:
         tool_registry.register(t)
-    print(f"✅ Email tools registered: {[t.name for t in EMAIL_TOOLS]}")
+    print(f"✅ General tools registered: {[t.name for t in GENERAL_TOOLS]}")
 except ImportError as e:
-    print(f"⚠️  Email tools not available: {e}")
+    print(f"⚠️  General tools not available: {e}")
 
 try:
+    from src.tools.email_tool import EMAIL_TOOLS
     from src.tools.calendar_tool import CALENDAR_TOOLS
-    for t in CALENDAR_TOOLS:
-        tool_registry.register(t)
-    print(f"✅ Calendar tools registered: {[t.name for t in CALENDAR_TOOLS]}")
+    from src.tools.mcp_adapter import MCPPluginAdapter
+    
+    mcp_adapter = MCPPluginAdapter()
+    mcp_adapter.register_tools("email", EMAIL_TOOLS)
+    mcp_adapter.register_tools("calendar", CALENDAR_TOOLS)
+    
+    installed_count = mcp_adapter.install_into_registry(tool_registry)
+    print(f"✅ MCP Plugin tools registered via adapter: {installed_count} tools across 2 servers")
 except ImportError as e:
-    print(f"⚠️  Calendar tools not available: {e}")
+    print(f"⚠️  MCP / Email / Calendar tools not available: {e}")
 
 # ── Optional Phase 4: RAG tools ───────────────────────────────────────────────
 rag_retriever = None
@@ -130,7 +137,7 @@ try:
     from src.scheduler import TaskScheduler
     from src.tools.automation import create_automation_tools
     task_scheduler = TaskScheduler()
-    task_scheduler.start()
+    # task_scheduler.start() — moved to lifespan startup to prevent races
     automation_tools = create_automation_tools(task_scheduler)
     for t in automation_tools:
         tool_registry.register(t)
@@ -258,6 +265,13 @@ async def lifespan(app):
     """Capture the event loop at startup for thread-safe WebSocket broadcasting."""
     global _event_loop
     _event_loop = asyncio.get_running_loop()
+    
+    # Bug #10: Start services inside lifespan to prevent startup race conditions
+    reminder_service.start()
+    if task_scheduler:
+        task_scheduler._agent = agent
+        task_scheduler.start()
+        print("✅ Task scheduler and reminder service started in lifespan context")
     yield
 
 app = FastAPI(title="Nova Assistant", version="2.0", lifespan=lifespan)
@@ -659,6 +673,37 @@ def delete_document(doc_id: str):
 @app.post("/api/workflow")
 def run_workflow(req: WorkflowRequest):
     """Run a multi-agent workflow for a complex goal."""
+    confirmation_result = {}
+
+    def web_confirm(tool_name: str, description: str) -> bool:
+        req_id = str(uuid.uuid4())
+        evt = threading.Event()
+        with _confirm_lock:
+            _pending_confirmations[req_id] = {"event": evt, "confirmed": False}
+
+        # Push confirmation request to UI via WebSocket
+        _ws_broadcast_sync({
+            "type": "confirmation_required",
+            "request_id": req_id,
+            "tool_name": tool_name,
+            "description": description,
+        })
+        confirmation_result["request_id"] = req_id
+        confirmation_result["tool_name"] = tool_name
+        confirmation_result["description"] = description
+
+        print(f"   🛡️ Awaiting UI confirmation (workflow) for: {tool_name} — {description}")
+        granted = evt.wait(timeout=30)  # 30s timeout
+
+        with _confirm_lock:
+            result = _pending_confirmations.pop(req_id, {}).get("confirmed", False)
+
+        if not granted:
+            print(f"   ⏱️  Confirmation timed out for {tool_name} — denying")
+            return False
+        print(f"   {'✅' if result else '🚫'} Confirmation {'granted' if result else 'denied'} for {tool_name}")
+        return result
+
     if orchestrator is None:
         # Fall back to single agent
         session = _get_session("default")
@@ -671,15 +716,23 @@ def run_workflow(req: WorkflowRequest):
                 response_text = agent.run(
                     user_message=req.goal,
                     conversation_history=history_snapshot,
-                    confirm_callback=lambda n, d: True,
+                    confirm_callback=web_confirm,
                     mode="chat",
                 )
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
-        return {"result": response_text, "tools_used": tools_used, "turn": current_turn, "agents_used": ["nova"]}
+        return {
+            "result": response_text,
+            "tools_used": tools_used,
+            "turn": current_turn,
+            "agents_used": ["nova"],
+            "requires_confirmation": confirmation_result if confirmation_result else None
+        }
 
     try:
-        result = orchestrator.run_workflow(req.goal, agents=req.agents)
+        result = orchestrator.run_workflow(req.goal, agents=req.agents, confirm_callback=web_confirm)
+        if confirmation_result:
+            result["requires_confirmation"] = confirmation_result
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

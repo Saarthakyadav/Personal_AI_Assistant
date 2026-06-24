@@ -88,6 +88,38 @@ for tool in ALL_BUILTIN_TOOLS:
     tool_registry.register(tool)
 print(f"✅ {tool_registry.count} built-in tool(s) registered: {tool_registry.tool_names}")
 
+# Register Browser tools
+try:
+    from src.tools.browser import BROWSER_TOOLS
+    for tool in BROWSER_TOOLS:
+        tool_registry.register(tool)
+    print(f"✅ Browser tools registered")
+except ImportError as e:
+    print(f"⚠️ Browser tools not available: {e}")
+
+# Register General tools
+try:
+    from src.tools.general_tools import GENERAL_TOOLS
+    for tool in GENERAL_TOOLS:
+        tool_registry.register(tool)
+    print(f"✅ General tools registered")
+except ImportError as e:
+    print(f"⚠️ General tools not available: {e}")
+
+# Register Email/Calendar via MCP
+try:
+    from src.tools.email_tool import EMAIL_TOOLS
+    from src.tools.calendar_tool import CALENDAR_TOOLS
+    from src.tools.mcp_adapter import MCPPluginAdapter
+    
+    mcp_adapter = MCPPluginAdapter()
+    mcp_adapter.register_tools("email", EMAIL_TOOLS)
+    mcp_adapter.register_tools("calendar", CALENDAR_TOOLS)
+    installed_count = mcp_adapter.install_into_registry(tool_registry)
+    print(f"✅ MCP tools registered: {installed_count} tools across 2 servers")
+except ImportError as e:
+    print(f"⚠️ MCP tools not available: {e}")
+
 # ── Microphone ───────────────────────────────────────────────
 print("\n🎤 Initializing wake word microphone...")
 try:
@@ -115,55 +147,56 @@ agent = None
 _tts_lock = threading.Lock()
 
 
-# ─────────────────────────────────────────────────────────────
-def _tts_speak(text: str):
-    """Create a fresh pyttsx3 engine per call to avoid Windows COM deadlock."""
-    try:
-        engine = pyttsx3.init()
-        engine.setProperty('rate', TTS_RATE)
-        for voice in engine.getProperty('voices'):
-            if TTS_VOICE_KEYWORD in voice.name.lower():
-                engine.setProperty('voice', voice.id)
-                break
-        engine.say(text)
-        engine.runAndWait()
-        engine.stop()
-    except Exception as e:
-        print(f"   ⚠️ TTS error: {e}")
+# ── TTS Engine ───────────────────────────────────────────────
+from src.audio.tts import TTSEngine
+tts_engine = TTSEngine(rate=TTS_RATE, voice_keyword=TTS_VOICE_KEYWORD)
 
 
 def speak(text: str):
-    """Mute mic → TTS in a fresh-engine thread → unmute with cooldown."""
+    """Mute mic → TTS with barge-in support → unmute with cooldown."""
     with _tts_lock:
         print(f"\n🤖 {text}")
 
         try:
+            # 1. Before starting TTS, set barge_in_mode = True and clear barge_in_event
+            mic.barge_in_mode = True
+            mic.barge_in_event.clear()
+
             with mic._mute_lock:
                 mic.muted = True
 
+            # Start TTS in a background thread to allow polling/interruption
             t = threading.Thread(
-                target=_tts_speak,
-                args=(text,),
+                target=tts_engine.speak,
+                args=(text, TTS_TIMEOUT),
                 daemon=True
             )
             t.start()
 
-            # Join with short timeouts so main thread stays interruptible.
-            # Safety cap: if TTS hangs longer than TTS_TIMEOUT, move on.
+            # 2. While TTS is playing, poll mic.barge_in_event
             waited = 0.0
+            interrupted = False
             while t.is_alive() and waited < TTS_TIMEOUT:
+                if mic.barge_in_event.is_set():
+                    print("\n   💥 Barge-in detected! Stopping TTS playback...")
+                    tts_engine.stop()
+                    interrupted = True
+                    break
                 t.join(timeout=0.1)
                 waited += 0.1
                 if _shutdown.is_set():
                     break
 
-            if t.is_alive():
+            if not interrupted and t.is_alive():
                 print("   ⚠️ TTS timed out, continuing...")
 
             # Small pause for driver buffer to drain
             time.sleep(0.3)
 
         finally:
+            # 4. Cleanup barge_in_mode
+            mic.barge_in_mode = False
+
             # Reset model state and set cooldown
             mic.set_wakeword_cooldown(2)
 

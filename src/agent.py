@@ -83,15 +83,17 @@ class AgentCore:
                 step_callback("step", f"Reasoning step {step + 1}")
 
             try:
-                response = self._client.chat.completions.create(
+                call_kwargs = dict(
                     model=self._model,
                     messages=messages,
-                    tools=tool_defs if tool_defs else None,
-                    tool_choice="auto" if tool_defs else None,
-                    parallel_tool_calls=False if tool_defs else None,
-                    max_tokens=1500 if mode == "chat" else 400,
+                    max_tokens=1500 if mode == "chat" else 800,  # FIX Bug #4: limit raised to 800
                     temperature=0.2,
                 )
+                if tool_defs:
+                    call_kwargs["tools"] = tool_defs
+                    call_kwargs["tool_choice"] = "auto"
+                    call_kwargs["parallel_tool_calls"] = False
+                response = self._client.chat.completions.create(**call_kwargs)  # FIX Bug #11: omit None params
             except Exception as e:
                 # ── Handle Groq's tool_use_failed error ───────────────
                 parsed = self._parse_failed_tool_call(e)
@@ -102,10 +104,22 @@ class AgentCore:
                         step_callback("tool", f"Using tool: {tool_name}")
 
                     tool = self._registry.get(tool_name)
-                    if tool and tool.requires_confirmation and confirm_callback:
+                    needs_confirm = False
+                    if tool:
+                        if tool.requires_confirmation:
+                            needs_confirm = True
+                        elif tool.name == "browser_search_and_book" and arguments.get("action") == "book":
+                            needs_confirm = True
+                        elif tool.name == "schedule_task":
+                            needs_confirm = True
+
+                    if needs_confirm and confirm_callback:
                         description = self._describe_tool_call(tool_name, arguments)
                         confirmed = confirm_callback(tool_name, description)
-                        if not confirmed:
+                        if isinstance(confirmed, str):
+                            result = confirmed
+                            print(f"   🚫 Confirmed blocked: {result}")
+                        elif not confirmed:
                             result = json.dumps({"status": "cancelled", "reason": "User declined."})
                             print(f"   🚫 User declined {tool_name}")
                         else:
@@ -167,10 +181,22 @@ class AgentCore:
 
                 # ── Guardrails: check if tool requires confirmation ───
                 tool = self._registry.get(tool_name)
-                if tool and tool.requires_confirmation and confirm_callback:
+                needs_confirm = False
+                if tool:
+                    if tool.requires_confirmation:
+                        needs_confirm = True
+                    elif tool.name == "browser_search_and_book" and arguments.get("action") == "book":
+                        needs_confirm = True
+                    elif tool.name == "schedule_task":
+                        needs_confirm = True
+
+                if needs_confirm and confirm_callback:
                     description = self._describe_tool_call(tool_name, arguments)
                     confirmed = confirm_callback(tool_name, description)
-                    if not confirmed:
+                    if isinstance(confirmed, str):
+                        result = confirmed
+                        print(f"   🚫 Confirmed blocked: {result}")
+                    elif not confirmed:
                         result = json.dumps({
                             "status": "cancelled",
                             "reason": "User declined confirmation."
@@ -231,6 +257,9 @@ class AgentCore:
             "- Use draft_email / send_email for email tasks.\n"
             "- Use list_emails when the user asks to check, read, or view their emails.\n"
             "- Use create_calendar_event for scheduling.\n"
+            "- Use execute_python when the user asks to run Python code, perform calculations, or process data.\n"
+            "- Use http_fetch when you need to fetch raw web/API content.\n"
+            "- Use read_file when the user asks to read or inspect a local text file.\n"
             "- For greetings, personal statements, general knowledge, respond DIRECTLY without tools.\n"
             "- When setting reminders, call get_current_datetime FIRST, THEN set_reminder.\n"
             "- NEVER call tools speculatively or 'just in case'.\n"
@@ -297,6 +326,15 @@ class AgentCore:
 
         if tool_name == "delete_calendar_event":
             return f"delete calendar event {arguments.get('event_id', '?')}"
+
+        if tool_name == "execute_python":
+            return f"execute a Python code snippet"
+
+        if tool_name == "read_file":
+            return f"read the local file '{arguments.get('filepath', '?')}'"
+
+        if tool_name == "schedule_task":
+            return f"schedule a background task '{arguments.get('name', '?')}'"
 
         # Generic fallback
         args_str = ", ".join(f"{k}={v}" for k, v in arguments.items())

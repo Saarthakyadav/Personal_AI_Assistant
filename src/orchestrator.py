@@ -25,16 +25,18 @@ from src.memory import UserMemory
 AGENT_TOOL_MAP = {
     "research": ["web_search", "browser_search_web", "search_documents", "get_current_datetime"],
     "browser":  ["browser_navigate", "browser_extract_text", "browser_search_web", "browser_search_and_book"],
-    "email":    ["draft_email", "send_email", "get_drafts"],
+    "email":    ["draft_email", "send_email", "get_drafts", "list_emails"],
     "calendar": ["create_calendar_event", "list_calendar_events", "delete_calendar_event", "get_current_datetime"],
+    "general":  ["execute_python", "http_fetch", "read_file"],
     "nova":     None,  # None means all tools
 }
 
 AGENT_DESCRIPTIONS = {
     "research":  "Research Agent — searches the web and documents for information",
     "browser":   "Browser Agent — automates web browsers for booking and extraction",
-    "email":     "Email Agent — drafts and sends emails",
+    "email":     "Email Agent — drafts, sends, and lists emails",
     "calendar":  "Calendar Agent — manages calendar events and scheduling",
+    "general":   "General Agent — runs python code, reads files, and fetches web/API URLs",
     "nova":      "Nova (General) — handles anything that doesn't fit a specialist",
 }
 
@@ -54,6 +56,7 @@ class Orchestrator:
         self,
         goal: str,
         agents: Optional[List[str]] = None,
+        confirm_callback: Optional[Any] = None,
         step_callback=None,
     ) -> dict:
         """
@@ -62,6 +65,7 @@ class Orchestrator:
         Args:
             goal:           High-level user goal.
             agents:         Optional list of agent names to use (auto-selected if None).
+            confirm_callback: Optional confirmation callback for guardrails.
             step_callback:  Optional (event_type, detail) → None callback for live UI.
 
         Returns:
@@ -100,6 +104,7 @@ class Orchestrator:
             sub_result = self._run_sub_agent(
                 agent_name=agent_name,
                 task=full_task,
+                confirm_callback=confirm_callback,
                 step_callback=step_callback,
             )
 
@@ -174,7 +179,13 @@ Example:
             print(f"   ⚠️ Workflow planning failed ({e}), falling back to single nova agent")
             return {"steps": [{"agent": "nova", "task": goal, "depends_on": []}]}
 
-    def _run_sub_agent(self, agent_name: str, task: str, step_callback=None) -> dict:
+    def _run_sub_agent(
+        self,
+        agent_name: str,
+        task: str,
+        confirm_callback: Optional[Any] = None,
+        step_callback=None,
+    ) -> dict:
         """Run a specialist sub-agent with a filtered tool set."""
         import types
         from src.agent import AgentCore
@@ -210,15 +221,26 @@ Example:
 
         sub_registry.execute = types.MethodType(patched_execute, sub_registry)
 
-        def tracking_confirm(tool_name, description):
+        # Set of irreversible tools to block in background/orchestrator default confirm
+        BLOCKED_TOOLS = {"send_email", "browser_search_and_book", "delete_calendar_event", "cancel_task"}
+
+        def default_confirm(tool_name: str, description: str) -> Any:
+            if tool_name in BLOCKED_TOOLS:
+                print(f"   ⚠️  Blocked irreversible tool in sub-agent background execution: {tool_name}")
+                return json.dumps({
+                    "status": "blocked",
+                    "reason": "Background tasks cannot execute irreversible actions"
+                })
             print(f"   🛡️ Sub-agent auto-approved: {tool_name}")
             return True
+
+        actual_confirm = confirm_callback if confirm_callback is not None else default_confirm
 
         try:
             result = sub_agent.run(
                 user_message=task,
                 conversation_history=[],
-                confirm_callback=tracking_confirm,
+                confirm_callback=actual_confirm,
                 mode="chat",
                 step_callback=step_callback,
             )

@@ -71,7 +71,7 @@ def create_automation_tools(scheduler) -> list:
             "required": ["name", "goal", "trigger", "trigger_args"],
         },
         handler=_schedule_task,
-        requires_confirmation=False,
+        requires_confirmation=True,  # FIX Bug #6: scheduling background tasks requires confirmation
     )
 
     LIST_TASKS = Tool(

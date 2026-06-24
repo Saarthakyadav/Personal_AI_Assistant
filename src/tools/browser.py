@@ -143,8 +143,8 @@ BROWSER_EXTRACT_TEXT = Tool(
 
 def _browser_search_web(query: str, site: Optional[str] = None) -> str:
     """
-    Search Google (or a specific site) and return top results with titles, snippets, URLs.
-    Better than duckduckgo for sites requiring JavaScript.
+    Search the web using DuckDuckGo via a real browser.
+    FIX Bug #8: replaced brittle Google scraping with DuckDuckGo's stabler DOM.
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -152,35 +152,45 @@ def _browser_search_web(query: str, site: Optional[str] = None) -> str:
         return json.dumps({"error": "Playwright not installed."})
 
     try:
-        search_url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
+        search_query = query
         if site:
-            search_url += f"+site:{site}"
+            search_query += f" site:{site}"
+        search_url = f"https://duckduckgo.com/?q={search_query.replace(' ', '+')}"
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
             page.set_extra_http_headers({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
             page.goto(search_url, timeout=30000, wait_until="domcontentloaded")
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(2000)
 
             results = []
-            result_divs = page.query_selector_all("div.g")
-            for div in result_divs[:5]:
+
+            # DuckDuckGo result selectors (much more stable than Google's)
+            result_articles = page.query_selector_all("article[data-testid='result']")
+            if not result_articles:
+                # Fallback: try older DDG layout
+                result_articles = page.query_selector_all(".result")
+
+            for article in result_articles[:5]:
                 try:
-                    title_el = div.query_selector("h3")
-                    link_el = div.query_selector("a")
-                    snippet_el = div.query_selector("[data-sncf], .VwiC3b, .s3v9rd")
+                    title_el = article.query_selector("h2 a, a.result__a")
+                    snippet_el = article.query_selector("[data-result='snippet'], .result__snippet")
                     title = title_el.inner_text() if title_el else ""
-                    href = link_el.get_attribute("href") if link_el else ""
+                    href = title_el.get_attribute("href") if title_el else ""
                     snippet = snippet_el.inner_text() if snippet_el else ""
                     if title and href:
                         results.append({"title": title, "url": href, "snippet": snippet[:200]})
                 except Exception:
                     continue
+
+            # If structured parsing fails, grab visible text as fallback
+            if not results:
+                body_text = page.inner_text("body")[:3000]
+                results = [{"title": "Search results (raw)", "url": search_url, "snippet": body_text[:500]}]
+
             browser.close()
 
-        if not results:
-            return json.dumps({"query": query, "results": [], "note": "No results parsed."})
         return json.dumps({"query": query, "results": results, "status": "ok"})
     except Exception as e:
         return json.dumps({"error": f"Browser search failed: {str(e)}"})
@@ -189,7 +199,7 @@ def _browser_search_web(query: str, site: Optional[str] = None) -> str:
 BROWSER_SEARCH_WEB = Tool(
     name="browser_search_web",
     description=(
-        "Search the web using a real browser (Google). More powerful than the basic web_search "
+        "Search the web using a real browser (DuckDuckGo). More powerful than the basic web_search "
         "tool — handles JavaScript-heavy pages. Returns top 5 results with titles, URLs, snippets."
     ),
     parameters={
@@ -242,6 +252,140 @@ BOOKING_SITES = {
 }
 
 
+# ── Site-specific form fillers (FIX Bug #9) ──────────────────────────────────
+
+def _fill_irctc_search(page, details: dict) -> str:
+    """Attempt to fill IRCTC train search form."""
+    try:
+        from_station = details.get("from", "")
+        to_station = details.get("to", "")
+        date = details.get("date", "")
+
+        filled = []
+
+        if from_station:
+            from_input = page.query_selector("input#origin, input[placeholder*='From'], p-autocomplete#origin input")
+            if from_input:
+                from_input.click()
+                from_input.fill(from_station)
+                page.wait_for_timeout(800)
+                suggestion = page.query_selector(".ui-autocomplete-list-item, .ng-star-inserted .list-item")
+                if suggestion:
+                    suggestion.click()
+                    page.wait_for_timeout(300)
+                filled.append(f"from={from_station}")
+
+        if to_station:
+            to_input = page.query_selector("input#destination, input[placeholder*='To'], p-autocomplete#destination input")
+            if to_input:
+                to_input.click()
+                to_input.fill(to_station)
+                page.wait_for_timeout(800)
+                suggestion = page.query_selector(".ui-autocomplete-list-item, .ng-star-inserted .list-item")
+                if suggestion:
+                    suggestion.click()
+                    page.wait_for_timeout(300)
+                filled.append(f"to={to_station}")
+
+        if date:
+            date_input = page.query_selector("input#jDate, input[placeholder*='Date'], p-calendar input")
+            if date_input:
+                date_input.click()
+                date_input.fill(date)
+                page.wait_for_timeout(300)
+                filled.append(f"date={date}")
+
+        return ", ".join(filled) if filled else "Could not fill form fields (site may require login)"
+    except Exception as e:
+        return f"Form fill partial: {str(e)}"
+
+
+def _fill_makemytrip_search(page, details: dict) -> str:
+    """Attempt to fill MakeMyTrip flight search form."""
+    try:
+        from_city = details.get("from", "")
+        to_city = details.get("to", "")
+
+        filled = []
+
+        # Close any popups
+        try:
+            close_btn = page.query_selector("[data-cy='closeModal'], .autopop__close")
+            if close_btn:
+                close_btn.click()
+                page.wait_for_timeout(500)
+        except Exception:
+            pass
+
+        if from_city:
+            from_el = page.query_selector("#fromCity, [data-cy='departureCity']")
+            if from_el:
+                from_el.click()
+                page.wait_for_timeout(300)
+                from_input = page.query_selector("input[placeholder*='From'], input.react-autosuggest__input")
+                if from_input:
+                    from_input.fill(from_city)
+                    page.wait_for_timeout(800)
+                    suggestion = page.query_selector(".react-autosuggest__suggestion, .makeFlex .font14")
+                    if suggestion:
+                        suggestion.click()
+                        page.wait_for_timeout(300)
+                    filled.append(f"from={from_city}")
+
+        if to_city:
+            to_el = page.query_selector("#toCity, [data-cy='arrivalCity']")
+            if to_el:
+                to_el.click()
+                page.wait_for_timeout(300)
+                to_input = page.query_selector("input[placeholder*='To'], input.react-autosuggest__input")
+                if to_input:
+                    to_input.fill(to_city)
+                    page.wait_for_timeout(800)
+                    suggestion = page.query_selector(".react-autosuggest__suggestion, .makeFlex .font14")
+                    if suggestion:
+                        suggestion.click()
+                        page.wait_for_timeout(300)
+                    filled.append(f"to={to_city}")
+
+        return ", ".join(filled) if filled else "Could not fill form fields"
+    except Exception as e:
+        return f"Form fill partial: {str(e)}"
+
+
+def _fill_amazon_search(page, details: dict) -> str:
+    """Fill Amazon search box and extract results."""
+    try:
+        search_query = details.get("query", details.get("product", ""))
+        if not search_query:
+            return "No search query provided"
+
+        search_box = page.query_selector("input#twotabsearchtextbox, input[name='field-keywords']")
+        if search_box:
+            search_box.fill(search_query)
+            search_box.press("Enter")
+            page.wait_for_timeout(3000)
+
+            results = []
+            items = page.query_selector_all("[data-component-type='s-search-result']")
+            for item in items[:5]:
+                try:
+                    title_el = item.query_selector("h2 a span, .a-text-normal")
+                    price_el = item.query_selector(".a-price .a-offscreen, .a-price-whole")
+                    title = title_el.inner_text() if title_el else ""
+                    price = price_el.inner_text() if price_el else "N/A"
+                    if title:
+                        results.append(f"{title} — {price}")
+                except Exception:
+                    continue
+
+            if results:
+                return f"Found {len(results)} results: " + " | ".join(results)
+            return f"Search submitted for '{search_query}' — page loaded"
+        return "Could not find search box"
+    except Exception as e:
+        return f"Amazon search partial: {str(e)}"
+
+
 def _browser_search_and_book(
     site: str,
     task_type: str,
@@ -250,7 +394,8 @@ def _browser_search_and_book(
 ) -> str:
     """
     Perform a search or booking flow on a supported site.
-    action: "search" (safe) or "book" (requires confirmation, actually completes booking)
+    FIX Bug #9: Now actually fills search forms on supported sites.
+    action: "search" (safe) or "book" (requires confirmation via agent layer)
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -273,26 +418,39 @@ def _browser_search_and_book(
             page.wait_for_timeout(2000)
 
             title = page.title()
-            text_preview = page.inner_text("body")[:500]
-            current_url = page.url
 
-            # Build a structured response
+            # Try site-specific form filling
+            form_result = "No form filling attempted"
+            if site_key == "irctc":
+                form_result = _fill_irctc_search(page, details)
+            elif site_key == "makemytrip":
+                form_result = _fill_makemytrip_search(page, details)
+            elif site_key == "amazon":
+                form_result = _fill_amazon_search(page, details)
+            elif site_key in ("swiggy", "zomato"):
+                form_result = "Food delivery sites require location access — page loaded for manual use"
+            elif site_key == "bookmyshow":
+                form_result = "BookMyShow loaded — use browser_extract_text for specific content"
+
+            text_preview = page.inner_text("body")[:800]
+            final_url = page.url
+
             result = {
                 "site": site_info["name"],
                 "task": task_type,
                 "details": details,
                 "action": action,
                 "page_title": title,
-                "url": current_url,
+                "url": final_url,
+                "form_result": form_result,
                 "page_preview": text_preview,
                 "note": site_info["note"],
                 "next_steps": (
-                    "The browser has opened the site. "
-                    "For a complete automated booking, the site requires login credentials. "
-                    "Please navigate to the URL manually to complete the booking, "
-                    "or provide your login details via environment variables."
+                    "Form fields have been filled where possible. "
+                    "For complete booking, the site requires login credentials. "
+                    "Navigate to the URL to review and complete the booking."
                 ) if action == "book" else (
-                    "Page opened successfully. Use browser_extract_text to read specific sections."
+                    "Search form filled where possible. Use browser_extract_text to read results."
                 ),
                 "status": "ok"
             }
@@ -334,7 +492,9 @@ BROWSER_SEARCH_AND_BOOK = Tool(
         "required": ["site", "task_type", "details"],
     },
     handler=_browser_search_and_book,
-    requires_confirmation=True,  # always confirm before booking
+    # FIX Bug #5: requires_confirmation is False — the agent layer dynamically
+    # checks the 'action' argument and only routes through confirmation for 'book'.
+    requires_confirmation=False,
 )
 
 
