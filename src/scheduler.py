@@ -52,6 +52,10 @@ class TaskScheduler:
         if self._scheduler and self._scheduler.running:
             self._scheduler.shutdown(wait=False)
 
+    def set_agent(self, agent):
+        """Set the AgentCore instance to be used for executing scheduled tasks."""
+        self._agent = agent
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def schedule_task(

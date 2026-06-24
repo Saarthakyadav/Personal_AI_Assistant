@@ -28,7 +28,7 @@ if sys.stdout.encoding != 'utf-8':
 if sys.stderr.encoding != 'utf-8':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -271,7 +271,7 @@ async def lifespan(app):
     # Bug #10: Start services inside lifespan to prevent startup race conditions
     reminder_service.start()
     if task_scheduler:
-        task_scheduler._agent = agent
+        task_scheduler.set_agent(agent)
         task_scheduler.start()
         print("✅ Task scheduler and reminder service started in lifespan context")
     yield
@@ -840,7 +840,7 @@ def list_mcp_server_tools(server_name: str):
 
 
 @app.post("/api/mcp/servers/{server_name}/tools/{tool_name}/execute")
-def execute_mcp_tool(server_name: str, tool_name: str, arguments: dict):
+def execute_mcp_tool(server_name: str, tool_name: str, arguments: dict = Body(default={})):
     """Execute an MCP tool directly."""
     if mcp_adapter is None:
         raise HTTPException(
@@ -854,6 +854,12 @@ def execute_mcp_tool(server_name: str, tool_name: str, arguments: dict):
     tool = server.get_tool(tool_name)
     if not tool:
         raise HTTPException(status_code=404, detail=f"MCP tool '{tool_name}' not found on server '{server_name}'")
+        
+    if tool.requires_confirmation:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Tool '{tool_name}' requires user confirmation. Use /api/chat instead."
+        )
         
     try:
         result = mcp_adapter.execute(server_name, tool_name, arguments)

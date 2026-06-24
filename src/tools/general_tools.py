@@ -206,6 +206,7 @@ def _read_file(filepath: str, max_chars: int = 5000) -> str:
 
     # Resolve to physical real path, resolving any symbolic links
     filepath = os.path.realpath(filepath)
+    filepath_normed = os.path.normcase(filepath)
 
     # Restrict read to allowed directories for security (Security fix #4)
     general_tools_dir = os.path.dirname(os.path.abspath(__file__))
@@ -219,10 +220,10 @@ def _read_file(filepath: str, max_chars: int = 5000) -> str:
 
     is_allowed = False
     for root in allowed_roots:
-        real_root = os.path.realpath(root)
+        real_root = os.path.normcase(os.path.realpath(root))
         try:
             # Check if filepath is within real_root using commonpath
-            if os.path.commonpath([real_root, filepath]) == real_root:
+            if os.path.commonpath([real_root, filepath_normed]) == real_root:
                 is_allowed = True
                 break
         except ValueError:
