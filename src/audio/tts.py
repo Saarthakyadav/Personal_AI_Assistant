@@ -100,20 +100,25 @@ class TTSEngine:
                 text=text,
                 voice_id="pNInz6obpgDQGcFmaJgB",  # "Adam" voice — clear, natural
                 model_id="eleven_multilingual_v2",
-                output_format="mp3_44100_128",
+                output_format="pcm_16000",
             )
 
             if self._stop_event.is_set():
                 return False
 
-            # Save to temp file and play
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+            # Save to temp file as WAV and play
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
             try:
-                for chunk in audio:
-                    if self._stop_event.is_set():
-                        tmp.close()
-                        return False
-                    tmp.write(chunk)
+                import wave
+                with wave.open(tmp.name, 'wb') as wav_file:
+                    wav_file.setnchannels(1)
+                    wav_file.setsampwidth(2)  # 16-bit PCM is 2 bytes
+                    wav_file.setframerate(16000)
+                    for chunk in audio:
+                        if self._stop_event.is_set():
+                            tmp.close()
+                            return False
+                        wav_file.writeframes(chunk)
                 tmp.close()
 
                 if self._stop_event.is_set():

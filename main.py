@@ -31,7 +31,6 @@ def _sigint_handler(sig, frame):
 signal.signal(signal.SIGINT, _sigint_handler)
 
 import numpy as np
-import pyttsx3
 from dotenv import load_dotenv
 from groq import Groq
 

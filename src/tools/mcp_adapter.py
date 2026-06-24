@@ -11,7 +11,7 @@ abstraction: tool grouping, server discovery, and unified routing.
 """
 
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable
 from src.tools import Tool, ToolRegistry
 
 
@@ -22,10 +22,12 @@ class MCPServer:
         self.name = name
         self.description = description
         self._tools: Dict[str, Tool] = {}
+        self._original_handlers: Dict[str, Callable] = {}
 
     def add_tool(self, tool: Tool):
         """Register a tool with this server."""
         self._tools[tool.name] = tool
+        self._original_handlers[tool.name] = tool.handler
 
     def list_tools(self) -> List[str]:
         """Return the names of all tools on this server."""
@@ -77,6 +79,14 @@ class MCPPluginAdapter:
             for tool_name in server.list_tools():
                 tool = server.get_tool(tool_name)
                 if tool:
+                    # Wrap handler to route via MCP execute (matching flowchart architectural routing)
+                    def make_mcp_handler(s_name=server.name, t_name=tool_name):
+                        def mcp_handler(*args, **kwargs):
+                            print(f"🔌 [MCP Route] server: '{s_name}' -> tool: '{t_name}'")
+                            return self.execute(s_name, t_name, kwargs)
+                        return mcp_handler
+
+                    tool.handler = make_mcp_handler()
                     registry.register(tool)
                     count += 1
         return count
@@ -108,8 +118,12 @@ class MCPPluginAdapter:
                 "available_tools": server.list_tools(),
             })
 
+        original_handler = server._original_handlers.get(tool_name)
+        if not original_handler:
+            return json.dumps({"error": f"Original handler not found for '{tool_name}' on server '{server_name}'."})
+
         try:
-            result = tool.handler(**arguments)
+            result = original_handler(**arguments)
             if not isinstance(result, str):
                 result = json.dumps(result)
             return result

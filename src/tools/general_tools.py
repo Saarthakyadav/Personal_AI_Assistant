@@ -45,12 +45,20 @@ def _execute_python(code: str, timeout: int = 10) -> str:
         tmp.write(code)
         tmp.close()
 
+        # Sanitize environment variables for security (Security fix #5)
+        env = os.environ.copy()
+        sensitive_patterns = ["key", "pass", "secret", "token", "email", "auth"]
+        for k in list(env.keys()):
+            if any(p in k.lower() for p in sensitive_patterns):
+                env.pop(k, None)
+
         result = subprocess.run(
             [sys.executable, tmp.name],
             capture_output=True,
             text=True,
             timeout=timeout,
             cwd=os.path.dirname(tmp.name),
+            env=env,
         )
 
         output = {
@@ -182,6 +190,30 @@ def _read_file(filepath: str, max_chars: int = 5000) -> str:
 
     # Resolve to absolute path
     filepath = os.path.abspath(filepath)
+
+    # Restrict read to allowed directories for security (Security fix #4)
+    general_tools_dir = os.path.dirname(os.path.abspath(__file__))
+    src_dir = os.path.dirname(general_tools_dir)
+    project_root = os.path.dirname(src_dir)
+    workspace_root = os.path.dirname(project_root)
+
+    allowed_roots = [
+        workspace_root,
+        tempfile.gettempdir(),
+    ]
+
+    is_allowed = False
+    for root in allowed_roots:
+        abs_root = os.path.abspath(root)
+        if filepath.startswith(abs_root):
+            is_allowed = True
+            break
+
+    if not is_allowed:
+        return json.dumps({
+            "error": "Access denied: Reading files outside the workspace directory is restricted for security.",
+            "filepath": filepath
+        })
 
     if not os.path.exists(filepath):
         return json.dumps({"error": f"File not found: {filepath}"})

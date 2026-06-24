@@ -50,8 +50,7 @@ def _load_drafts():
 def _save_drafts_unlocked():
     """Persist drafts to disk. Caller must hold _draft_lock."""
     try:
-        from datetime import datetime as _dt
-        data = {"drafts": _drafts, "updated_at": _dt.now().isoformat()}
+        data = {"drafts": _drafts, "updated_at": datetime.now().isoformat()}
         parent = os.path.dirname(_DRAFTS_FILE)
         if parent:
             os.makedirs(parent, exist_ok=True)
