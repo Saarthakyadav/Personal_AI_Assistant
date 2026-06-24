@@ -202,8 +202,8 @@ def _read_file(filepath: str, max_chars: int = 5000) -> str:
     if not filepath:
         return json.dumps({"error": "No filepath provided."})
 
-    # Resolve to absolute path
-    filepath = os.path.abspath(filepath)
+    # Resolve to physical real path, resolving any symbolic links
+    filepath = os.path.realpath(filepath)
 
     # Restrict read to allowed directories for security (Security fix #4)
     general_tools_dir = os.path.dirname(os.path.abspath(__file__))
@@ -217,10 +217,10 @@ def _read_file(filepath: str, max_chars: int = 5000) -> str:
 
     is_allowed = False
     for root in allowed_roots:
-        abs_root = os.path.abspath(root)
+        real_root = os.path.realpath(root)
         try:
-            # Check if filepath is within abs_root using commonpath
-            if os.path.commonpath([abs_root, filepath]) == abs_root:
+            # Check if filepath is within real_root using commonpath
+            if os.path.commonpath([real_root, filepath]) == real_root:
                 is_allowed = True
                 break
         except ValueError:
