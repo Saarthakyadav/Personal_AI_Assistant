@@ -19,7 +19,7 @@ import json
 import asyncio
 import threading
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, asynccontextmanager
 from typing import Optional, List, Dict, Any
 
 # Force UTF-8 output on Windows
@@ -114,12 +114,11 @@ try:
     from src.rag.retriever import RAGRetriever
     from src.tools.rag_tool import create_rag_tool
     rag_retriever = RAGRetriever()
-    rag_tool = create_rag_tool(rag_retriever)
-    tool_registry.register(rag_tool)
-    # Also register the list_documents companion tool
-    if hasattr(rag_tool, '_list_companion'):
-        tool_registry.register(rag_tool._list_companion)
-    print("✅ RAG tool registered")
+    # FIX #16: create_rag_tool now returns a (search_tool, list_tool) tuple
+    rag_search_tool, rag_list_tool = create_rag_tool(rag_retriever)
+    tool_registry.register(rag_search_tool)
+    tool_registry.register(rag_list_tool)
+    print("✅ RAG tools registered")
 except ImportError as e:
     print(f"⚠️  RAG not available (pip install chromadb sentence-transformers pymupdf): {e}")
 except Exception as e:
@@ -162,10 +161,20 @@ except ImportError as e:
     print(f"⚠️  Orchestrator not available: {e}")
 
 # ── Conversation state ────────────────────────────────────────────────────────
+# FIX #4: Per-session conversation history to prevent cross-user data leaks.
+# Each session gets its own history list and turn counter.
 MAX_HISTORY_TURNS = 10
-conversation_history: list = []
-turn_count = 0
+_sessions: Dict[str, dict] = {}   # session_id → {"history": [], "turn_count": 0}
+_sessions_lock = threading.Lock()
 _chat_lock = threading.Lock()
+
+
+def _get_session(session_id: str = "default") -> dict:
+    """Get or create a per-session conversation state."""
+    with _sessions_lock:
+        if session_id not in _sessions:
+            _sessions[session_id] = {"history": [], "turn_count": 0}
+        return _sessions[session_id]
 
 # ── Pending confirmations (guardrail modal) ───────────────────────────────────
 # Maps request_id → threading.Event + result dict
@@ -177,49 +186,81 @@ _ws_clients: List[WebSocket] = []
 _ws_lock = threading.Lock()
 
 
+# FIX #9: Capture the running event loop at startup so background threads
+# can safely schedule coroutines without calling asyncio.get_event_loop()
+# (which is deprecated/broken in non-async threads on Python 3.10+).
+_event_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
 def _ws_broadcast_sync(data: dict):
     """Thread-safe broadcast to all connected WebSocket clients."""
+    if _event_loop is None:
+        return
     with _ws_lock:
         clients = list(_ws_clients)
     for ws in clients:
         try:
-            # Schedule in the event loop
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.run_coroutine_threadsafe(ws.send_json(data), loop)
+            asyncio.run_coroutine_threadsafe(ws.send_json(data), _event_loop)
         except Exception:
             pass
 
 
 # ── Thread-safe tool tracking context manager ─────────────────────────────────
+_track_lock = threading.Lock()  # FIX #5: serialise patch/restore of execute
+
+
 @contextmanager
 def track_tools(registry: ToolRegistry):
     """
     Context manager that wraps the registry's execute() to collect tool names
-    used during the request. Thread-safe — uses a local list, not a global.
+    used during the request.  Thread-safe — uses a local list and a lock to
+    prevent concurrent patch/restore races.
     """
-    tools_used: List[str] = []
-    original_execute = registry.__class__.execute
-
-    def patched_execute(self, tool_name: str, arguments: dict) -> str:
-        tools_used.append(tool_name)
-        return original_execute(self, tool_name, arguments)
-
-    # Bind a per-instance override (avoids mutating the class method)
     import types
-    registry.execute = types.MethodType(patched_execute, registry)
+    tools_used: List[str] = []
+
+    with _track_lock:
+        # FIX #5: Save the *current* execute (class method or prior patch)
+        # so we restore to exactly what was there before, even under concurrency.
+        saved_execute = getattr(registry, 'execute', registry.__class__.execute)
+        class_execute = registry.__class__.execute
+
+        def patched_execute(self, tool_name: str, arguments: dict) -> str:
+            tools_used.append(tool_name)
+            return class_execute(self, tool_name, arguments)
+
+        registry.execute = types.MethodType(patched_execute, registry)
+
     try:
         yield tools_used
     finally:
-        # Restore: delete the instance attribute so the class method is used again
-        try:
-            del registry.execute
-        except AttributeError:
-            pass
+        with _track_lock:
+            try:
+                # Restore to the state before our patch
+                if saved_execute is class_execute:
+                    # Was the class method — just remove instance override
+                    try:
+                        del registry.execute
+                    except AttributeError:
+                        pass
+                else:
+                    # Was another patch — restore it
+                    registry.execute = saved_execute
+            except Exception:
+                pass
 
 
-# ── FastAPI app ───────────────────────────────────────────────────────────────
-app = FastAPI(title="Nova Assistant", version="2.0")
+# ── FastAPI app ─────────────────────────────────────────────────────────────────────
+
+# FIX #9: Use lifespan instead of deprecated @app.on_event("startup")
+@asynccontextmanager
+async def lifespan(app):
+    """Capture the event loop at startup for thread-safe WebSocket broadcasting."""
+    global _event_loop
+    _event_loop = asyncio.get_running_loop()
+    yield
+
+app = FastAPI(title="Nova Assistant", version="2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -232,6 +273,7 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     message: str
+    session_id: Optional[str] = "default"  # FIX #4: per-session history
 
 class ChatResponse(BaseModel):
     response: str
@@ -291,77 +333,83 @@ class TaskCreateRequest(BaseModel):
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     """Send a message to Nova and get a response."""
-    global turn_count
-
     message = req.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
+    # FIX #4: per-session conversation history
+    session = _get_session(req.session_id or "default")
+    session_history = session["history"]
+
+    # FIX #8: Hold _chat_lock only for the minimal state mutation (turn counter
+    # + snapshot), then release it before agent.run() so confirmation waits
+    # don't block all other HTTP requests for up to 30 seconds.
     with _chat_lock:
-        # BUG FIX #1: increment only once per request
-        turn_count += 1
-        current_turn = turn_count
+        session["turn_count"] += 1
+        current_turn = session["turn_count"]
+        history_snapshot = list(session_history)
 
-        # BUG FIX #2: thread-safe tool tracking via context manager
-        with track_tools(tool_registry) as tools_used:
-            # Phase 3: real confirmation callback — creates a pending confirmation
-            # and waits up to 30s for the frontend to respond via /api/confirm
-            confirmation_result = {}
+    # BUG FIX #2: thread-safe tool tracking via context manager
+    with track_tools(tool_registry) as tools_used:
+        # Phase 3: real confirmation callback — creates a pending confirmation
+        # and waits up to 30s for the frontend to respond via /api/confirm
+        confirmation_result = {}
 
-            def web_confirm(tool_name: str, description: str) -> bool:
-                req_id = str(uuid.uuid4())
-                evt = threading.Event()
-                with _confirm_lock:
-                    _pending_confirmations[req_id] = {"event": evt, "confirmed": False}
+        def web_confirm(tool_name: str, description: str) -> bool:
+            req_id = str(uuid.uuid4())
+            evt = threading.Event()
+            with _confirm_lock:
+                _pending_confirmations[req_id] = {"event": evt, "confirmed": False}
 
-                # Push confirmation request to UI via WebSocket
-                _ws_broadcast_sync({
-                    "type": "confirmation_required",
-                    "request_id": req_id,
-                    "tool_name": tool_name,
-                    "description": description,
-                })
-                confirmation_result["request_id"] = req_id
-                confirmation_result["tool_name"] = tool_name
-                confirmation_result["description"] = description
+            # Push confirmation request to UI via WebSocket
+            _ws_broadcast_sync({
+                "type": "confirmation_required",
+                "request_id": req_id,
+                "tool_name": tool_name,
+                "description": description,
+            })
+            confirmation_result["request_id"] = req_id
+            confirmation_result["tool_name"] = tool_name
+            confirmation_result["description"] = description
 
-                print(f"   🛡️ Awaiting UI confirmation for: {tool_name} — {description}")
-                granted = evt.wait(timeout=30)  # 30s timeout
+            print(f"   🛡️ Awaiting UI confirmation for: {tool_name} — {description}")
+            granted = evt.wait(timeout=30)  # 30s timeout
 
-                with _confirm_lock:
-                    result = _pending_confirmations.pop(req_id, {}).get("confirmed", False)
+            with _confirm_lock:
+                result = _pending_confirmations.pop(req_id, {}).get("confirmed", False)
 
-                if not granted:
-                    print(f"   ⏱️  Confirmation timed out for {tool_name} — denying")
-                    return False
-                print(f"   {'✅' if result else '🚫'} Confirmation {'granted' if result else 'denied'} for {tool_name}")
-                return result
+            if not granted:
+                print(f"   ⏱️  Confirmation timed out for {tool_name} — denying")
+                return False
+            print(f"   {'✅' if result else '🚫'} Confirmation {'granted' if result else 'denied'} for {tool_name}")
+            return result
 
-            try:
-                response_text = agent.run(
-                    user_message=message,
-                    conversation_history=conversation_history,
-                    confirm_callback=web_confirm,
-                    mode="chat",
-                )
-            except Exception as e:
-                print(f"❌ Agent error: {e}")
-                raise HTTPException(status_code=500, detail=f"Agent error: {str(e)}")
+        try:
+            response_text = agent.run(
+                user_message=message,
+                conversation_history=history_snapshot,
+                confirm_callback=web_confirm,
+                mode="chat",
+            )
+        except Exception as e:
+            print(f"❌ Agent error: {e}")
+            raise HTTPException(status_code=500, detail=f"Agent error: {str(e)}")
 
-        # Update conversation history
-        conversation_history.append({"role": "user", "content": message})
-        conversation_history.append({"role": "assistant", "content": response_text})
+    # Update conversation history (re-acquire lock for the mutation)
+    with _chat_lock:
+        session_history.append({"role": "user", "content": message})
+        session_history.append({"role": "assistant", "content": response_text})
 
         # Trim history to window
-        if len(conversation_history) > MAX_HISTORY_TURNS * 2:
-            del conversation_history[:2]
+        if len(session_history) > MAX_HISTORY_TURNS * 2:
+            del session_history[:2]
 
-        # Extract user facts in background
-        threading.Thread(
-            target=memory.extract_and_store,
-            args=(message, response_text, client),
-            daemon=True,
-        ).start()
+    # Extract user facts in background
+    threading.Thread(
+        target=memory.extract_and_store,
+        args=(message, response_text, client),
+        daemon=True,
+    ).start()
 
     return ChatResponse(
         response=response_text,
@@ -376,20 +424,23 @@ def chat(req: ChatRequest):
 @app.post("/api/voice", response_model=VoiceResponse)
 async def voice_chat(file: UploadFile = File(...)):
     """Upload an audio file, transcribe it, and process through the agent."""
-    global turn_count
-
     import tempfile
 
     suffix = os.path.splitext(file.filename)[1] if file.filename else ".webm"
     if not suffix:
         suffix = ".webm"
 
+    # FIX #6: Ensure the temp file is always closed before unlink, even on
+    # exception.  On Windows, os.unlink() raises PermissionError if the
+    # file handle is still open.
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     temp_path = temp_file.name
     try:
-        contents = await file.read()
-        temp_file.write(contents)
-        temp_file.close()
+        try:
+            contents = await file.read()
+            temp_file.write(contents)
+        finally:
+            temp_file.close()  # always close, even on error
 
         print(f"   📝 Transcribing uploaded voice: {file.filename} ({len(contents)} bytes) ...")
         with open(temp_path, 'rb') as f:
@@ -419,38 +470,44 @@ async def voice_chat(file: UploadFile = File(...)):
         except Exception:
             pass
 
+    # FIX #4: per-session history (voice uses 'default' session)
+    session = _get_session("default")
+    session_history = session["history"]
+
+    # FIX #8: minimal lock scope — snapshot under lock, run agent outside lock
     with _chat_lock:
-        # BUG FIX #1: increment only once
-        turn_count += 1
-        current_turn = turn_count
+        session["turn_count"] += 1
+        current_turn = session["turn_count"]
+        history_snapshot = list(session_history)
 
-        with track_tools(tool_registry) as tools_used:
-            def web_confirm_voice(tool_name: str, description: str) -> bool:
-                print(f"   🛡️ Auto-approved (voice): {tool_name} — {description}")
-                return True
+    with track_tools(tool_registry) as tools_used:
+        def web_confirm_voice(tool_name: str, description: str) -> bool:
+            print(f"   🛡️ Auto-approved (voice): {tool_name} — {description}")
+            return True
 
-            try:
-                response_text = agent.run(
-                    user_message=transcript_text,
-                    conversation_history=conversation_history,
-                    confirm_callback=web_confirm_voice,
-                    mode="voice",
-                )
-            except Exception as e:
-                print(f"❌ Agent error: {e}")
-                raise HTTPException(status_code=500, detail=f"Agent error: {str(e)}")
+        try:
+            response_text = agent.run(
+                user_message=transcript_text,
+                conversation_history=history_snapshot,
+                confirm_callback=web_confirm_voice,
+                mode="voice",
+            )
+        except Exception as e:
+            print(f"❌ Agent error: {e}")
+            raise HTTPException(status_code=500, detail=f"Agent error: {str(e)}")
 
-        conversation_history.append({"role": "user", "content": transcript_text})
-        conversation_history.append({"role": "assistant", "content": response_text})
+    with _chat_lock:
+        session_history.append({"role": "user", "content": transcript_text})
+        session_history.append({"role": "assistant", "content": response_text})
 
-        if len(conversation_history) > MAX_HISTORY_TURNS * 2:
-            del conversation_history[:2]
+        if len(session_history) > MAX_HISTORY_TURNS * 2:
+            del session_history[:2]
 
-        threading.Thread(
-            target=memory.extract_and_store,
-            args=(transcript_text, response_text, client),
-            daemon=True,
-        ).start()
+    threading.Thread(
+        target=memory.extract_and_store,
+        args=(transcript_text, response_text, client),
+        daemon=True,
+    ).start()
 
     return VoiceResponse(
         transcript=transcript_text,
@@ -523,20 +580,23 @@ def get_reminders():
 # ── History endpoint ──────────────────────────────────────────────────────────
 
 @app.get("/api/history", response_model=HistoryResponse)
-def get_history():
+def get_history(session_id: str = "default"):
+    # FIX #4: per-session history
+    session = _get_session(session_id)
     messages = [
         HistoryMessage(role=m["role"], content=m["content"])
-        for m in conversation_history
+        for m in session["history"]
     ]
-    return HistoryResponse(messages=messages, turn=turn_count)
+    return HistoryResponse(messages=messages, turn=session["turn_count"])
 
 
 @app.delete("/api/history")
-def clear_history():
-    global turn_count
+def clear_history(session_id: str = "default"):
+    # FIX #4: per-session history
+    session = _get_session(session_id)
     with _chat_lock:
-        conversation_history.clear()
-        turn_count = 0
+        session["history"].clear()
+        session["turn_count"] = 0
     return {"status": "ok"}
 
 
@@ -601,20 +661,21 @@ def run_workflow(req: WorkflowRequest):
     """Run a multi-agent workflow for a complex goal."""
     if orchestrator is None:
         # Fall back to single agent
+        session = _get_session("default")
         with _chat_lock:
-            global turn_count
-            turn_count += 1
-            current_turn = turn_count
-            with track_tools(tool_registry) as tools_used:
-                try:
-                    response_text = agent.run(
-                        user_message=req.goal,
-                        conversation_history=conversation_history,
-                        confirm_callback=lambda n, d: True,
-                        mode="chat",
-                    )
-                except Exception as e:
-                    raise HTTPException(status_code=500, detail=str(e))
+            session["turn_count"] += 1
+            current_turn = session["turn_count"]
+            history_snapshot = list(session["history"])
+        with track_tools(tool_registry) as tools_used:
+            try:
+                response_text = agent.run(
+                    user_message=req.goal,
+                    conversation_history=history_snapshot,
+                    confirm_callback=lambda n, d: True,
+                    mode="chat",
+                )
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
         return {"result": response_text, "tools_used": tools_used, "turn": current_turn, "agents_used": ["nova"]}
 
     try:
@@ -660,13 +721,14 @@ def create_task(req: TaskCreateRequest):
     if task_scheduler is None:
         raise HTTPException(status_code=503, detail="Scheduler not available — install apscheduler")
     try:
+        session = _get_session("default")
         task_id = task_scheduler.schedule_task(
             name=req.name,
             goal=req.goal,
             trigger=req.trigger,
             trigger_args=req.trigger_args,
             agent=agent,
-            conversation_history=conversation_history,
+            conversation_history=session["history"],
         )
         return {"task_id": task_id, "status": "scheduled"}
     except Exception as e:
@@ -692,6 +754,8 @@ app.mount("/static", StaticFiles(directory=ui_dir), name="static")
 @app.get("/")
 def serve_ui():
     return FileResponse(os.path.join(ui_dir, "index.html"))
+
+
 
 
 # ── Run ───────────────────────────────────────────────────────────────────────

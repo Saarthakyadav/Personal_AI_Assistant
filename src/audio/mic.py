@@ -120,12 +120,7 @@ class EnhancedMicrophone:
         print("🎤 Microphone listening for wake word...")
         print(f"   Wake words: alexa, hey jarvis")
 
-    # def stop_listening(self):
-    #     self.is_listening = False
-    #     if self.stream:
-    #         self.stream.stop()
-    #         self.stream.close()
-    #         self.stream = None
+
     def stop_listening(self):
         self.is_listening = False
 
@@ -142,13 +137,6 @@ class EnhancedMicrophone:
 
             self.stream = None
 
-    # def set_wakeword_cooldown(self, seconds=3):
-    #     self.ignore_wake_until = time.time() + seconds
-    #     self._cooldown_printed = False   # FIX #6: allow one print per new cooldown
-    #     # Flush openWakeWord's internal buffer so stale audio from before
-    #     # the cooldown can't fire the moment the cooldown expires
-    #     if self.ml_detector is not None:
-    #         self.ml_detector.reset_states()
 
     def set_wakeword_cooldown(self, seconds=3):
         self.ignore_wake_until = time.time() + seconds
@@ -209,7 +197,7 @@ class EnhancedMicrophone:
                 self.silence_frames = 0  # FIX #5: reset silence counter on new capture
                 self._vad_carryover = np.empty((0,), dtype=np.int16)
 
-                    # FIX #7: larger pre-roll (0.5s = 8000 samples) to avoid clipping command start
+                # FIX #7: larger pre-roll (0.5s = 8000 samples) to avoid clipping command start
                 pre_roll = self.ring_buffer.get_last_n(3200)
                 self.current_utterance = list(pre_roll) if len(pre_roll) > 0 else []
 
@@ -257,8 +245,12 @@ class EnhancedMicrophone:
                     self.silence_frames = 0
                 else:
                     self.silence_frames += silence_frames_in_chunk
+                    # FIX #12: cap counter to prevent unbounded growth
+                    if self.silence_frames > self.max_silence_frames:
+                        self.silence_frames = self.max_silence_frames
 
-            except Exception:
+            except Exception as e:
+                print(f"   ⚠️ VAD error (ignored): {e}")
                 self.silence_frames = 0
 
             # End capture on silence timeout OR max duration

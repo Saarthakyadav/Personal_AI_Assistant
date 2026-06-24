@@ -4,12 +4,16 @@ RAG search tool for Nova — searches indexed PDF documents.
 """
 
 import json
-from typing import Optional
+from typing import Optional, Tuple
 from src.tools import Tool
 
 
-def create_rag_tool(retriever) -> Tool:
-    """Create a Tool wired to the given RAGRetriever instance."""
+def create_rag_tool(retriever) -> Tuple[Tool, Tool]:
+    """Create Tool(s) wired to the given RAGRetriever instance.
+
+    Returns:
+        (search_tool, list_tool) tuple — caller should register both.
+    """
 
     def _search_documents(query: str, top_k: int = 4, filename: Optional[str] = None) -> str:
         """Search indexed PDF documents for relevant information."""
@@ -21,6 +25,12 @@ def create_rag_tool(retriever) -> Tool:
                     if filename.lower() in doc.get("filename", "").lower():
                         doc_id = doc["doc_id"]
                         break
+
+            # Ensure top_k is an integer
+            try:
+                top_k = int(top_k)
+            except (ValueError, TypeError):
+                top_k = 4
 
             results = retriever.search(query, top_k=top_k, doc_id=doc_id)
             if not results:
@@ -104,7 +114,6 @@ def create_rag_tool(retriever) -> Tool:
         requires_confirmation=False,
     )
 
-    # Return the primary search tool; list_documents can be registered separately
-    # (server.py registers both via a small extension below)
-    search_tool._list_companion = list_tool
-    return search_tool
+    # FIX #16: Return both tools as a tuple instead of monkey-patching
+    # a dynamic attribute onto the dataclass instance.
+    return search_tool, list_tool

@@ -9,7 +9,7 @@ No tool here requires confirmation — they are read-only / side-effect-free.
 import json
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 
 from src.tools import Tool
 
@@ -18,10 +18,13 @@ from src.tools import Tool
 
 def _get_current_datetime() -> str:
     """Return the current date, time, day of week, and timezone."""
-    now = datetime.now()
+    # FIX #18: explicitly create a timezone-aware datetime instead of
+    # calling .astimezone() on a naive datetime (which is implicit and
+    # triggers DeprecationWarning in some Python versions).
+    now = datetime.now(timezone.utc).astimezone()
     return (
         f"Current date and time: {now.strftime('%A, %B %d, %Y at %I:%M %p')}. "
-        f"Timezone: {now.astimezone().tzname()}."
+        f"Timezone: {now.tzname()}."
     )
 
 

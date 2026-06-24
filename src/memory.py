@@ -105,8 +105,8 @@ class UserMemory:
         with self._lock:
             added = []
             for fact in new_facts:
-                # Simple dedup: skip if an existing fact is a case-insensitive match
-                if any(fact.lower() == existing.lower() for existing in self._facts):
+                # FIX #11: improved dedup — exact match OR word-overlap similarity
+                if self._is_duplicate(fact):
                     continue
                 self._facts.append(fact)
                 added.append(fact)
@@ -122,6 +122,31 @@ class UserMemory:
         return added
 
     # ── Private helpers ───────────────────────────────────────────────────
+
+    def _is_duplicate(self, new_fact: str) -> bool:
+        """Check if a new fact is a near-duplicate of any existing fact.
+
+        Uses exact case-insensitive match first, then Jaccard word similarity
+        (threshold 0.7) to catch paraphrases like "User's name is Saarthak"
+        vs "The user is named Saarthak".
+
+        Caller must hold self._lock.
+        """
+        new_lower = new_fact.lower()
+        new_words = set(new_lower.split())
+
+        for existing in self._facts:
+            existing_lower = existing.lower()
+            # Exact match
+            if new_lower == existing_lower:
+                return True
+            # Word-overlap (Jaccard) similarity
+            existing_words = set(existing_lower.split())
+            intersection = new_words & existing_words
+            union = new_words | existing_words
+            if union and len(intersection) / len(union) >= 0.7:
+                return True
+        return False
 
     def _load(self):
         """Load facts from disk.  Missing / corrupt file → start fresh."""

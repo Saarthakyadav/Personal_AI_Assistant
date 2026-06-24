@@ -229,6 +229,7 @@ class AgentCore:
             "- Use search_documents when the user asks about an uploaded PDF document.\n"
             "- Use browser_navigate / browser_search_and_book for web automation tasks.\n"
             "- Use draft_email / send_email for email tasks.\n"
+            "- Use list_emails when the user asks to check, read, or view their emails.\n"
             "- Use create_calendar_event for scheduling.\n"
             "- For greetings, personal statements, general knowledge, respond DIRECTLY without tools.\n"
             "- When setting reminders, call get_current_datetime FIRST, THEN set_reminder.\n"

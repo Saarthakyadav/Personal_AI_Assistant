@@ -119,7 +119,12 @@ def _send_email(draft_id: Optional[str] = None, to: Optional[str] = None,
         cc = draft.get("cc", "")
     else:
         if not to or not subject or not body:
-            return json.dumps({"error": "Provide either draft_id or all of: to, subject, body."})
+            return json.dumps({
+                "error": "Missing required fields. You MUST provide either: "
+                         "(1) a draft_id from a previous draft_email call, OR "
+                         "(2) all three fields: to, subject, and body.",
+                "action_required": "Call draft_email first to create a draft, then use the returned draft_id.",
+            })
         cc = ""
 
     try:
@@ -207,6 +212,172 @@ GET_DRAFTS = Tool(
 )
 
 
+# ── 4. list_emails (IMAP) ────────────────────────────────────────────────────
+
+def _list_emails(count: int = 10, folder: str = "INBOX") -> str:
+    """
+    Fetch the most recent emails from the user's Gmail inbox via IMAP.
+    Returns sender, subject, date, and a body snippet for each email.
+    """
+    import imaplib
+    import email as email_lib
+    from email.header import decode_header
+
+    email_address = os.getenv("EMAIL_ADDRESS", "")
+    email_password = os.getenv("EMAIL_PASSWORD", "")
+
+    if not email_address or not email_password:
+        return json.dumps({
+            "error": "Email not configured. Add EMAIL_ADDRESS and EMAIL_PASSWORD to .env file.",
+            "setup_instructions": (
+                "1. Enable 2-Step Verification on Google. "
+                "2. Go to myaccount.google.com/apppasswords. "
+                "3. Create an App Password for Mail. "
+                "4. Add EMAIL_ADDRESS=your@gmail.com and EMAIL_PASSWORD=xxxx to .env."
+            )
+        })
+
+    try:
+        # Connect to Gmail IMAP
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+        mail.login(email_address, email_password)
+        mail.select(folder, readonly=True)
+
+        # Search for all emails in the folder
+        status, message_ids = mail.search(None, "ALL")
+        if status != "OK" or not message_ids[0]:
+            mail.logout()
+            return json.dumps({"emails": [], "count": 0, "folder": folder})
+
+        # Get the latest N email IDs
+        id_list = message_ids[0].split()
+        latest_ids = id_list[-count:]  # last N emails (most recent)
+        latest_ids.reverse()           # newest first
+
+        emails = []
+        for eid in latest_ids:
+            try:
+                status, msg_data = mail.fetch(eid, "(RFC822)")
+                if status != "OK" or not msg_data or not msg_data[0]:
+                    continue
+
+                raw_email = msg_data[0][1]
+                msg = email_lib.message_from_bytes(raw_email)
+
+                # Decode subject
+                subject_raw = msg.get("Subject", "(No Subject)")
+                decoded_parts = decode_header(subject_raw)
+                subject = ""
+                for part, charset in decoded_parts:
+                    if isinstance(part, bytes):
+                        subject += part.decode(charset or "utf-8", errors="replace")
+                    else:
+                        subject += part
+
+                # Decode sender
+                from_raw = msg.get("From", "Unknown")
+                decoded_from = decode_header(from_raw)
+                sender = ""
+                for part, charset in decoded_from:
+                    if isinstance(part, bytes):
+                        sender += part.decode(charset or "utf-8", errors="replace")
+                    else:
+                        sender += part
+
+                # Date
+                date_str = msg.get("Date", "Unknown")
+
+                # Extract body snippet
+                body_snippet = ""
+                if msg.is_multipart():
+                    for part in msg.walk():
+                        content_type = part.get_content_type()
+                        content_disp = str(part.get("Content-Disposition", ""))
+                        if content_type == "text/plain" and "attachment" not in content_disp:
+                            try:
+                                payload = part.get_payload(decode=True)
+                                if payload:
+                                    charset = part.get_content_charset() or "utf-8"
+                                    body_snippet = payload.decode(charset, errors="replace")
+                            except Exception:
+                                pass
+                            break
+                else:
+                    try:
+                        payload = msg.get_payload(decode=True)
+                        if payload:
+                            charset = msg.get_content_charset() or "utf-8"
+                            body_snippet = payload.decode(charset, errors="replace")
+                    except Exception:
+                        pass
+
+                # Truncate body snippet
+                body_snippet = body_snippet.strip()
+                if len(body_snippet) > 300:
+                    body_snippet = body_snippet[:300] + "..."
+
+                emails.append({
+                    "from": sender,
+                    "subject": subject,
+                    "date": date_str,
+                    "snippet": body_snippet,
+                })
+            except Exception:
+                continue
+
+        mail.logout()
+
+        return json.dumps({
+            "emails": emails,
+            "count": len(emails),
+            "folder": folder,
+            "total_in_folder": len(id_list),
+        }, indent=2)
+
+    except imaplib.IMAP4.error as e:
+        error_msg = str(e)
+        if "AUTHENTICATIONFAILED" in error_msg.upper() or "Invalid credentials" in error_msg:
+            return json.dumps({
+                "error": "Gmail IMAP authentication failed.",
+                "hint": (
+                    "Make sure: (1) IMAP is enabled in Gmail settings (Settings > Forwarding and POP/IMAP > Enable IMAP), "
+                    "(2) You are using an App Password (not your regular password), "
+                    "(3) EMAIL_ADDRESS and EMAIL_PASSWORD in .env are correct."
+                )
+            })
+        return json.dumps({"error": f"IMAP error: {error_msg}"})
+    except Exception as e:
+        return json.dumps({"error": f"Failed to fetch emails: {str(e)}"})
+
+
+LIST_EMAILS = Tool(
+    name="list_emails",
+    description=(
+        "Fetch and list recent emails from the user's Gmail inbox. "
+        "Returns sender, subject, date, and a body preview for each email. "
+        "Use this when the user asks to check, read, or list their emails. "
+        "Requires EMAIL_ADDRESS and EMAIL_PASSWORD (Gmail App Password) in .env, "
+        "and IMAP must be enabled in Gmail settings."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "count": {
+                "type": "integer",
+                "description": "Number of recent emails to fetch (default: 10, max: 25).",
+            },
+            "folder": {
+                "type": "string",
+                "description": "The mailbox folder to read from (default: 'INBOX'). Other options: '[Gmail]/Sent Mail', '[Gmail]/Starred', etc.",
+            },
+        },
+        "required": [],
+    },
+    handler=_list_emails,
+    requires_confirmation=False,
+)
+
+
 # ── Exported list ─────────────────────────────────────────────────────────────
 
-EMAIL_TOOLS = [DRAFT_EMAIL, SEND_EMAIL, GET_DRAFTS]
+EMAIL_TOOLS = [DRAFT_EMAIL, SEND_EMAIL, GET_DRAFTS, LIST_EMAILS]

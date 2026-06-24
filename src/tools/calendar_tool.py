@@ -21,7 +21,7 @@ from typing import Optional
 from src.tools import Tool
 
 
-_CALENDAR_FILE = os.path.join(os.path.dirname(__file__), "..", "..", "calendar_events.json")
+_CALENDAR_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "calendar_events.json"))
 _cal_lock = threading.Lock()
 
 
@@ -37,7 +37,9 @@ def _load_events() -> list:
 
 def _save_events(events: list):
     data = {"events": events, "updated_at": datetime.now().isoformat()}
-    os.makedirs(os.path.dirname(_CALENDAR_FILE), exist_ok=True)
+    parent = os.path.dirname(_CALENDAR_FILE)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(_CALENDAR_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
@@ -134,13 +136,18 @@ def _list_calendar_events(days_ahead: int = 7) -> str:
                     "id": e["id"],
                     "title": e["title"],
                     "start": start_dt.strftime("%I:%M %p on %A, %B %d"),
+                    "_sort_key": start_dt.isoformat(),  # FIX #13: sort by raw datetime
                     "location": e.get("location", ""),
                     "description": e.get("description", ""),
                 })
         except Exception:
             continue
 
-    upcoming.sort(key=lambda x: x["start"])
+    # FIX #13: sort by ISO datetime string, not formatted display string
+    upcoming.sort(key=lambda x: x["_sort_key"])
+    # Remove the sort key before returning
+    for item in upcoming:
+        item.pop("_sort_key", None)
 
     return json.dumps({
         "events": upcoming,

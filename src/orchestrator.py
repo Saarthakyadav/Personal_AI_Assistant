@@ -176,6 +176,7 @@ Example:
 
     def _run_sub_agent(self, agent_name: str, task: str, step_callback=None) -> dict:
         """Run a specialist sub-agent with a filtered tool set."""
+        import types
         from src.agent import AgentCore
 
         # Build a filtered tool registry for this agent
@@ -199,6 +200,16 @@ Example:
 
         tools_used = []
 
+        # FIX #1: Track tools by wrapping sub_registry.execute with a
+        # per-instance override that records every tool call.
+        original_execute = sub_registry.__class__.execute
+
+        def patched_execute(self_reg, tool_name: str, arguments: dict) -> str:
+            tools_used.append(tool_name)
+            return original_execute(self_reg, tool_name, arguments)
+
+        sub_registry.execute = types.MethodType(patched_execute, sub_registry)
+
         def tracking_confirm(tool_name, description):
             print(f"   🛡️ Sub-agent auto-approved: {tool_name}")
             return True
@@ -213,6 +224,12 @@ Example:
             )
         except Exception as e:
             result = f"Sub-agent '{agent_name}' failed: {str(e)}"
+        finally:
+            # Restore: remove the instance override so the class method is used again
+            try:
+                del sub_registry.execute
+            except AttributeError:
+                pass
 
         return {"result": result, "tools_used": tools_used}
 

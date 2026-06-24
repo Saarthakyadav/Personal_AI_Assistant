@@ -123,9 +123,13 @@ class RAGRetriever:
         Returns:
             (doc_id, chunk_count)
         """
-        # Generate a stable doc ID from filename + file hash
+        # Generate a stable doc ID from filename + file hash (chunked to avoid
+        # loading entire file into memory for large PDFs — FIX #14)
+        h = hashlib.md5()
         with open(pdf_path, "rb") as f:
-            file_hash = hashlib.md5(f.read()).hexdigest()[:8]
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        file_hash = h.hexdigest()[:8]
         doc_id = f"doc_{file_hash}"
 
         # Extract and chunk
@@ -191,9 +195,20 @@ class RAGRetriever:
         where_filter = {"doc_id": doc_id} if doc_id else None
 
         with self._lock:
+            # FIX #3: guard against empty collection — ChromaDB raises if n_results=0
+            collection_count = self._collection.count()
+            if collection_count == 0:
+                return []
+
+            # Ensure top_k is an integer
+            try:
+                top_k = int(top_k)
+            except (ValueError, TypeError):
+                top_k = 4
+
             results = self._collection.query(
                 query_embeddings=query_embedding,
-                n_results=min(top_k, self._collection.count()),
+                n_results=min(top_k, collection_count),
                 where=where_filter,
                 include=["documents", "metadatas", "distances"],
             )

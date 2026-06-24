@@ -113,18 +113,22 @@ class ReminderService:
                 if dt <= compare_now:
                     to_fire.append(reminder)
 
-        # Fire outside the lock so speak() (which is blocking) doesn't
-        # hold the lock for the entire TTS duration.
+        # FIX #7: Mark reminders done UNDER the lock BEFORE speaking, so a
+        # second _fire_due_reminders() call can't re-collect them if speak()
+        # takes longer than 15s (the check interval).
+        if to_fire:
+            with self._lock:
+                for reminder in to_fire:
+                    reminder["done"] = True
+                self._save_unlocked()
+
+        # Now speak outside the lock — reminders are already marked done
         for reminder in to_fire:
             print(f"\n⏰ Reminder firing: {reminder['message']}")
             try:
                 self._speak(f"Reminder: {reminder['message']}")
             except Exception as e:
                 print(f"   ⚠️ Reminder speak failed: {e}")
-
-            with self._lock:
-                reminder["done"] = True
-                self._save_unlocked()
 
     # ── Persistence ──────────────────────────────────────────────────────
 

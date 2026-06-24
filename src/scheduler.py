@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 
 
-_TASKS_FILE = os.path.join(os.path.dirname(__file__), "..", "scheduled_tasks.json")
+_TASKS_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scheduled_tasks.json"))
 
 
 class TaskScheduler:
@@ -228,7 +228,9 @@ class TaskScheduler:
         """Caller must hold self._lock."""
         try:
             data = {"tasks": self._tasks, "updated_at": datetime.now().isoformat()}
-            os.makedirs(os.path.dirname(_TASKS_FILE), exist_ok=True)
+            parent = os.path.dirname(_TASKS_FILE)
+            if parent:  # guard against empty dirname
+                os.makedirs(parent, exist_ok=True)
             with open(_TASKS_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:

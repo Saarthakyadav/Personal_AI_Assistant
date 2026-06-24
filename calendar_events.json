@@ -1,0 +1,23 @@
+{
+  "events": [
+    {
+      "id": "09ab2b28",
+      "title": "Flight",
+      "start": "2026-06-26T18:00:00",
+      "end": "2026-06-26T20:00:00",
+      "description": "Flight from Delhi to Mumbai",
+      "location": "Delhi to Mumbai",
+      "created_at": "2026-06-25T00:05:49.694312"
+    },
+    {
+      "id": "a70aac71",
+      "title": "Flight from Delhi to Mumbai",
+      "start": "2026-06-26T18:00:00",
+      "end": "2026-06-26T19:00:00",
+      "description": "",
+      "location": "",
+      "created_at": "2026-06-25T00:07:46.523933"
+    }
+  ],
+  "updated_at": "2026-06-25T00:07:46.523933"
+}
