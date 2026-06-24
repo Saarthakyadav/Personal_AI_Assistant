@@ -14,6 +14,7 @@ groq>=0.9.0
 # ── Text-to-speech (local, no API key needed) ─────────────────────────────────
 pyttsx3==2.90
 elevenlabs>=1.0.0
+pygame>=2.5.0
 
 # ── Web search (free, no API key) ─────────────────────────────────────────────
 duckduckgo-search>=6.0.0

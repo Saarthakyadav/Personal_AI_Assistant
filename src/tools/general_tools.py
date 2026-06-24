@@ -45,12 +45,26 @@ def _execute_python(code: str, timeout: int = 10) -> str:
         tmp.write(code)
         tmp.close()
 
-        # Sanitize environment variables for security (Security fix #5)
-        env = os.environ.copy()
-        sensitive_patterns = ["key", "pass", "secret", "token", "email", "auth"]
-        for k in list(env.keys()):
-            if any(p in k.lower() for p in sensitive_patterns):
-                env.pop(k, None)
+        # Construct minimal environment to strip sensitive system variables and credentials (Security fix #5)
+        # On Windows, SystemRoot and SystemDrive are required for cryptographically secure random number generation.
+        env = {
+            "PYTHONPATH": "",
+        }
+        if sys.platform == "win32":
+            sys_root = os.environ.get("SystemRoot", "C:\\Windows")
+            env["PATH"] = os.path.pathsep.join([
+                os.path.join(sys_root, "system32"),
+                sys_root,
+                os.environ.get("PATH", "")
+            ])
+            env["SystemRoot"] = sys_root
+            if "SystemDrive" in os.environ:
+                env["SystemDrive"] = os.environ["SystemDrive"]
+        else:
+            env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin" + (os.path.pathsep + os.environ.get("PATH", "") if os.environ.get("PATH") else "")
+
+        env["TEMP"] = tempfile.gettempdir()
+        env["TMP"] = tempfile.gettempdir()
 
         result = subprocess.run(
             [sys.executable, tmp.name],
@@ -195,19 +209,22 @@ def _read_file(filepath: str, max_chars: int = 5000) -> str:
     general_tools_dir = os.path.dirname(os.path.abspath(__file__))
     src_dir = os.path.dirname(general_tools_dir)
     project_root = os.path.dirname(src_dir)
-    workspace_root = os.path.dirname(project_root)
 
     allowed_roots = [
-        workspace_root,
+        project_root,
         tempfile.gettempdir(),
     ]
 
     is_allowed = False
     for root in allowed_roots:
         abs_root = os.path.abspath(root)
-        if filepath.startswith(abs_root):
-            is_allowed = True
-            break
+        try:
+            # Check if filepath is within abs_root using commonpath
+            if os.path.commonpath([abs_root, filepath]) == abs_root:
+                is_allowed = True
+                break
+        except ValueError:
+            continue
 
     if not is_allowed:
         return json.dumps({

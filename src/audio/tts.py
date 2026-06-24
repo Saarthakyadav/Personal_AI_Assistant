@@ -177,6 +177,13 @@ class TTSEngine:
 
             if proc.poll() is None:
                 proc.terminate()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+            if proc.returncode and proc.returncode != 0 and not self._stop_event.is_set():
+                raise FileNotFoundError("Subprocess playback failed")
 
         except FileNotFoundError:
             # ffplay/powershell not available — try pygame as last resort

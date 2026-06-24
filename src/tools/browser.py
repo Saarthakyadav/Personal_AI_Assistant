@@ -356,34 +356,89 @@ def _fill_amazon_search(page, details: dict) -> str:
     """Fill Amazon search box and extract results."""
     try:
         search_query = details.get("query", details.get("product", ""))
-        if not search_query:
-            return "No search query provided"
+        
+        # Check if results are already present from a direct URL load
+        items = page.query_selector_all("[data-component-type='s-search-result']")
+        if not items and search_query:
+            search_box = page.query_selector("input#twotabsearchtextbox, input[name='field-keywords']")
+            if search_box:
+                search_box.fill(search_query)
+                search_box.press("Enter")
+                page.wait_for_timeout(3000)
+                items = page.query_selector_all("[data-component-type='s-search-result']")
 
-        search_box = page.query_selector("input#twotabsearchtextbox, input[name='field-keywords']")
-        if search_box:
-            search_box.fill(search_query)
-            search_box.press("Enter")
-            page.wait_for_timeout(3000)
+        results = []
+        for item in items[:5]:
+            try:
+                title_el = item.query_selector("h2 a span, .a-text-normal")
+                price_el = item.query_selector(".a-price .a-offscreen, .a-price-whole")
+                title = title_el.inner_text() if title_el else ""
+                price = price_el.inner_text() if price_el else "N/A"
+                if title:
+                    results.append(f"{title} — {price}")
+            except Exception:
+                continue
 
-            results = []
-            items = page.query_selector_all("[data-component-type='s-search-result']")
-            for item in items[:5]:
-                try:
-                    title_el = item.query_selector("h2 a span, .a-text-normal")
-                    price_el = item.query_selector(".a-price .a-offscreen, .a-price-whole")
-                    title = title_el.inner_text() if title_el else ""
-                    price = price_el.inner_text() if price_el else "N/A"
-                    if title:
-                        results.append(f"{title} — {price}")
-                except Exception:
-                    continue
-
-            if results:
-                return f"Found {len(results)} results: " + " | ".join(results)
-            return f"Search submitted for '{search_query}' — page loaded"
-        return "Could not find search box"
+        if results:
+            return f"Found {len(results)} results: " + " | ".join(results)
+        return "Search page loaded — no items matched results selector structure"
     except Exception as e:
         return f"Amazon search partial: {str(e)}"
+
+
+def _get_direct_search_url(site_key: str, task_type: str, details: dict) -> Optional[str]:
+    """Generate direct query search URL to bypass homepage popups/selectors."""
+    import urllib.parse
+    import re
+    
+    if site_key == "amazon":
+        query = details.get("query") or details.get("product") or ""
+        if query:
+            return f"https://www.amazon.in/s?k={urllib.parse.quote(query)}"
+            
+    elif site_key == "makemytrip":
+        from_city = details.get("from", "").strip().upper()
+        to_city = details.get("to", "").strip().upper()
+        date = details.get("date", "").strip()
+        
+        if from_city and to_city:
+            if re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+                parts = date.split("-")
+                date = f"{parts[2]}/{parts[1]}/{parts[0]}"
+            elif re.match(r"^\d{2}-\d{2}-\d{4}$", date):
+                date = date.replace("-", "/")
+            elif not date:
+                import datetime
+                date = (datetime.date.today() + datetime.timedelta(days=7)).strftime("%d/%m/%Y")
+            
+            airport_codes = {
+                "DELHI": "DEL", "NEW DELHI": "DEL", "MUMBAI": "BOM", "BOMBAY": "BOM",
+                "BANGALORE": "BLR", "BENGALURU": "BLR", "KOLKATA": "CCU", "CALCUTTA": "CCU",
+                "CHENNAI": "MAA", "MADRAS": "MAA", "HYDERABAD": "HYD", "PUNE": "PNQ"
+            }
+            from_code = airport_codes.get(from_city, from_city)
+            to_code = airport_codes.get(to_city, to_city)
+            return f"https://www.makemytrip.com/flight/search?itinerary={urllib.parse.quote(from_code)}-{urllib.parse.quote(to_code)}-{date}&tripType=O&itineraryType=ONE_WAY&paxType=A-1_C-0_I-0&intl=false&cabinetClass=E"
+            
+    elif site_key == "swiggy":
+        query = details.get("query") or details.get("food") or ""
+        if query:
+            return f"https://www.swiggy.com/search?query={urllib.parse.quote(query)}"
+            
+    elif site_key == "zomato":
+        query = details.get("query") or details.get("food") or ""
+        if query:
+            return f"https://www.zomato.com/search?q={urllib.parse.quote(query)}"
+            
+    elif site_key == "bookmyshow":
+        city = details.get("city", "mumbai").lower().strip()
+        query = details.get("query") or details.get("movie") or ""
+        if query:
+            return f"https://in.bookmyshow.com/search?search={urllib.parse.quote(query)}"
+        else:
+            return f"https://in.bookmyshow.com/explore/movies-{city}"
+            
+    return None
 
 
 def _browser_search_and_book(
@@ -394,7 +449,7 @@ def _browser_search_and_book(
 ) -> str:
     """
     Perform a search or booking flow on a supported site.
-    FIX Bug #9: Now actually fills search forms on supported sites.
+    FIX Bug #9: Now actually constructs direct query URLs and fills search forms where needed.
     action: "search" (safe) or "book" (requires confirmation via agent layer)
     """
     try:
@@ -409,28 +464,37 @@ def _browser_search_and_book(
         "note": f"Generic automation for {site}.",
     })
 
+    # Generate direct search URL if possible to skip popups and land directly on results
+    direct_url = _get_direct_search_url(site_key, task_type, details)
+    target_url = direct_url if direct_url else site_info["search_url"]
+
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
             page.set_extra_http_headers({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-            page.goto(site_info["search_url"], timeout=30000, wait_until="domcontentloaded")
+            page.goto(target_url, timeout=30000, wait_until="domcontentloaded")
             page.wait_for_timeout(2000)
 
             title = page.title()
 
-            # Try site-specific form filling
-            form_result = "No form filling attempted"
-            if site_key == "irctc":
-                form_result = _fill_irctc_search(page, details)
-            elif site_key == "makemytrip":
-                form_result = _fill_makemytrip_search(page, details)
-            elif site_key == "amazon":
-                form_result = _fill_amazon_search(page, details)
-            elif site_key in ("swiggy", "zomato"):
-                form_result = "Food delivery sites require location access — page loaded for manual use"
-            elif site_key == "bookmyshow":
-                form_result = "BookMyShow loaded — use browser_extract_text for specific content"
+            # Try site-specific form filling only if we didn't use a direct URL
+            form_result = "Direct query URL navigated successfully" if direct_url else "No form filling attempted"
+            if not direct_url:
+                if site_key == "irctc":
+                    form_result = _fill_irctc_search(page, details)
+                elif site_key == "makemytrip":
+                    form_result = _fill_makemytrip_search(page, details)
+                elif site_key == "amazon":
+                    form_result = _fill_amazon_search(page, details)
+                elif site_key in ("swiggy", "zomato"):
+                    form_result = "Food delivery sites require location access — page loaded for manual use"
+                elif site_key == "bookmyshow":
+                    form_result = "BookMyShow loaded — use browser_extract_text for specific content"
+            else:
+                # If we used direct URL but want to run the extraction part of the helpers:
+                if site_key == "amazon":
+                    form_result = _fill_amazon_search(page, details)
 
             text_preview = page.inner_text("body")[:800]
             final_url = page.url
@@ -446,11 +510,11 @@ def _browser_search_and_book(
                 "page_preview": text_preview,
                 "note": site_info["note"],
                 "next_steps": (
-                    "Form fields have been filled where possible. "
-                    "For complete booking, the site requires login credentials. "
+                    "Form fields have been filled and prepared where possible. "
+                    "For complete booking, the site requires login credentials and checkout payment. "
                     "Navigate to the URL to review and complete the booking."
                 ) if action == "book" else (
-                    "Search form filled where possible. Use browser_extract_text to read results."
+                    "Search query prepared and results extracted. Click the URL to view in browser."
                 ),
                 "status": "ok"
             }
@@ -463,10 +527,13 @@ def _browser_search_and_book(
 BROWSER_SEARCH_AND_BOOK = Tool(
     name="browser_search_and_book",
     description=(
-        "Automate a search or booking flow on supported sites: IRCTC, MakeMyTrip, BookMyShow, "
-        "Amazon, Swiggy, Zomato. "
-        "Always set action='search' first to preview results, then action='book' to proceed. "
-        "Supported sites: irctc, makemytrip, bookmyshow, amazon, swiggy, zomato."
+        "Prepare a search query or navigate to booking pages on supported sites "
+        "(IRCTC, MakeMyTrip, BookMyShow, Amazon, Swiggy, Zomato). "
+        "This tool constructs direct search URLs and loads them using a headless browser to extract "
+        "results, then returns the search URL and page preview. "
+        "WARNING: This tool CANNOT complete transactions, checkout, or log into accounts due to "
+        "security and authentication requirements (e.g. passwords, OTP, Captcha). The user must "
+        "manually click the returned URL to complete any booking or purchase."
     ),
     parameters={
         "type": "object",
@@ -481,19 +548,17 @@ BROWSER_SEARCH_AND_BOOK = Tool(
             },
             "details": {
                 "type": "object",
-                "description": "Search details as key-value pairs, e.g. {'from': 'Delhi', 'to': 'Mumbai', 'date': '2026-07-10', 'class': '3A'}",
+                "description": "Search details as key-value pairs, e.g. {'from': 'Delhi', 'to': 'Mumbai', 'date': '2026-07-10', 'class': '3A', 'query': 'laptop'}",
             },
             "action": {
                 "type": "string",
                 "enum": ["search", "book"],
-                "description": "'search' to find options (safe), 'book' to proceed with booking (requires user confirmation).",
+                "description": "'search' to find options (safe), 'book' to prepare final booking state (requires confirmation).",
             },
         },
         "required": ["site", "task_type", "details"],
     },
     handler=_browser_search_and_book,
-    # FIX Bug #5: requires_confirmation is False — the agent layer dynamically
-    # checks the 'action' argument and only routes through confirmation for 'book'.
     requires_confirmation=False,
 )
 

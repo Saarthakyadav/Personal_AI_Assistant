@@ -58,12 +58,11 @@ print("🎙️ Agentic Voice AI - Nova Assistant")
 print("=" * 60)
 
 # ── TTS config ───────────────────────────────────────────────
-# pyttsx3 engine is created fresh per call inside the TTS thread.
-# Reusing a global engine from a non-main thread causes COM deadlocks on Windows.
+# Audio synthesis is managed by TTSEngine (supporting ElevenLabs + pyttsx3 fallback).
 TTS_RATE = 160
 TTS_VOICE_KEYWORD = 'david'
 TTS_TIMEOUT = 30  # seconds — safety limit so we never hang forever
-print("✅ TTS ready (per-call engine)")
+print("✅ TTS ready (TTSEngine)")
 
 # ── Groq ─────────────────────────────────────────────────────
 print("\n🧠 Initializing Groq...")

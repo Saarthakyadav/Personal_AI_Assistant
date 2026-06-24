@@ -798,6 +798,60 @@ def cancel_task(task_id: str):
     return {"status": "cancelled", "task_id": task_id}
 
 
+# ── MCP Plugin endpoints ──────────────────────────────────────────────────────
+
+@app.get("/api/mcp/servers")
+def list_mcp_servers():
+    """List all registered MCP-style plugin servers."""
+    if mcp_adapter is None:
+        return {"servers": [], "available": False}
+    return {"servers": mcp_adapter.list_servers(), "available": True}
+
+
+@app.get("/api/mcp/servers/{server_name}/tools")
+def list_mcp_server_tools(server_name: str):
+    """List tools registered for a specific MCP server."""
+    if mcp_adapter is None:
+        raise HTTPException(status_code=503, detail="MCP adapter not initialized")
+    server = mcp_adapter.get_server(server_name)
+    if not server:
+        raise HTTPException(status_code=404, detail=f"MCP server '{server_name}' not found")
+    
+    tools = []
+    for tool_name in server.list_tools():
+        tool = server.get_tool(tool_name)
+        if tool:
+            tools.append({
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+                "requires_confirmation": tool.requires_confirmation
+            })
+    return {"server": server_name, "tools": tools}
+
+
+@app.post("/api/mcp/servers/{server_name}/tools/{tool_name}/execute")
+def execute_mcp_tool(server_name: str, tool_name: str, arguments: dict):
+    """Execute an MCP tool directly."""
+    if mcp_adapter is None:
+        raise HTTPException(status_code=503, detail="MCP adapter not initialized")
+    server = mcp_adapter.get_server(server_name)
+    if not server:
+        raise HTTPException(status_code=404, detail=f"MCP server '{server_name}' not found")
+    
+    tool = server.get_tool(tool_name)
+    if not tool:
+        raise HTTPException(status_code=404, detail=f"MCP tool '{tool_name}' not found on server '{server_name}'")
+        
+    try:
+        result = mcp_adapter.execute(server_name, tool_name, arguments)
+        return json.loads(result)
+    except json.JSONDecodeError:
+        return {"result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Serve the UI ──────────────────────────────────────────────────────────────
 
 ui_dir = os.path.join(os.path.dirname(__file__), "ui")
