@@ -295,7 +295,15 @@ def _fill_irctc_search(page, details: dict) -> str:
                 page.wait_for_timeout(300)
                 filled.append(f"date={date}")
 
-        return ", ".join(filled) if filled else "Could not fill form fields (site may require login)"
+        if not filled:
+            # If no inputs were found, it means the login wall or modal blocked it
+            return (
+                f"IRCTC requires an authenticated login session. The search fields could not be pre-filled "
+                f"due to the login wall. Please click the URL to log in, then enter details manually: "
+                f"From: '{from_station or 'N/A'}', To: '{to_station or 'N/A'}', Date: '{date or 'N/A'}'."
+            )
+
+        return ", ".join(filled)
     except Exception as e:
         return f"Form fill partial: {str(e)}"
 

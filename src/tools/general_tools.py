@@ -103,7 +103,9 @@ EXECUTE_PYTHON = Tool(
     description=(
         "Execute a Python code snippet and return the output. "
         "Use this for calculations, data processing, or running small scripts. "
-        "The code runs in a sandboxed subprocess with a 10-second timeout. "
+        "The code runs in an isolated subprocess with a 10-second timeout. "
+        "NOTE: While system credentials and user variables are stripped for security, "
+        "network access and filesystem access are still possible within the subprocess. "
         "IMPORTANT: This runs real code on the user's machine — always explain "
         "what the code does before executing."
     ),

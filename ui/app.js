@@ -1047,9 +1047,48 @@
     }
   });
 
+  // ============================= CHECK MODULE STATUSES =============================
+  async function updateStatuses() {
+    try {
+      const res = await fetch(`${API}/api/status`);
+      if (!res.ok) return;
+      const data = await res.json();
+      
+      const components = ['browser', 'email', 'calendar', 'rag', 'scheduler'];
+      components.forEach(comp => {
+        const chip = document.getElementById(`${comp}-status`);
+        if (chip) {
+          const info = data[comp];
+          if (info && info.available) {
+            chip.className = 'status-chip ok';
+            chip.innerHTML = '<span class="dot"></span>ready';
+            chip.removeAttribute('title');
+          } else {
+            chip.className = 'status-chip warn';
+            chip.innerHTML = '<span class="dot"></span>disabled';
+            if (comp === 'email' || comp === 'calendar') {
+              chip.title = data.mcp && data.mcp.error ? `Error: ${data.mcp.error}` : 'MCP adapter not initialized';
+            } else if (comp === 'rag') {
+              chip.title = 'RAG not available. Install dependencies: chromadb sentence-transformers pymupdf';
+            } else if (comp === 'scheduler') {
+              chip.title = 'Scheduler not available. Install dependency: apscheduler';
+            } else if (comp === 'browser') {
+              chip.title = 'Browser tools not available. Install dependency: playwright';
+            } else {
+              chip.title = 'Module dependencies or configuration missing';
+            }
+          }
+        }
+      });
+    } catch (e) {
+      console.error('Failed to update statuses:', e);
+    }
+  }
+
   // ============================= INIT =============================
   if (sendBtn) sendBtn.disabled = true;
   loadHistory();
   connectWebSocket();
+  updateStatuses();
 
 })();

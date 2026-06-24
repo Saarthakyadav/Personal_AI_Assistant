@@ -66,6 +66,7 @@ print(f"✅ User memory ready ({memory.fact_count} fact(s) loaded)")
 # Tool registry
 tool_registry = ToolRegistry()
 mcp_adapter = None
+mcp_error = None
 for tool in ALL_BUILTIN_TOOLS:
     tool_registry.register(tool)
 
@@ -112,7 +113,8 @@ try:
     
     installed_count = mcp_adapter.install_into_registry(tool_registry)
     print(f"✅ MCP Plugin tools registered via adapter: {installed_count} tools across 2 servers")
-except ImportError as e:
+except Exception as e:
+    mcp_error = str(e)
     print(f"⚠️  MCP / Email / Calendar tools not available: {e}")
 
 # ── Optional Phase 4: RAG tools ───────────────────────────────────────────────
@@ -804,7 +806,11 @@ def cancel_task(task_id: str):
 def list_mcp_servers():
     """List all registered MCP-style plugin servers."""
     if mcp_adapter is None:
-        return {"servers": [], "available": False}
+        return {
+            "servers": [],
+            "available": False,
+            "error": mcp_error or "MCP adapter not initialized"
+        }
     return {"servers": mcp_adapter.list_servers(), "available": True}
 
 
@@ -812,7 +818,10 @@ def list_mcp_servers():
 def list_mcp_server_tools(server_name: str):
     """List tools registered for a specific MCP server."""
     if mcp_adapter is None:
-        raise HTTPException(status_code=503, detail="MCP adapter not initialized")
+        raise HTTPException(
+            status_code=503,
+            detail=f"MCP adapter not initialized. Reason: {mcp_error or 'Not loaded'}"
+        )
     server = mcp_adapter.get_server(server_name)
     if not server:
         raise HTTPException(status_code=404, detail=f"MCP server '{server_name}' not found")
@@ -834,7 +843,10 @@ def list_mcp_server_tools(server_name: str):
 def execute_mcp_tool(server_name: str, tool_name: str, arguments: dict):
     """Execute an MCP tool directly."""
     if mcp_adapter is None:
-        raise HTTPException(status_code=503, detail="MCP adapter not initialized")
+        raise HTTPException(
+            status_code=503,
+            detail=f"MCP adapter not initialized. Reason: {mcp_error or 'Not loaded'}"
+        )
     server = mcp_adapter.get_server(server_name)
     if not server:
         raise HTTPException(status_code=404, detail=f"MCP server '{server_name}' not found")
@@ -850,6 +862,48 @@ def execute_mcp_tool(server_name: str, tool_name: str, arguments: dict):
         return {"result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/status")
+def get_system_status():
+    """Get the status of all assistant modules."""
+    # 1. RAG status
+    rag_ok = False
+    if rag_retriever is not None:
+        rag_ok = True
+        
+    # 2. Scheduler status
+    scheduler_ok = False
+    if task_scheduler is not None:
+        scheduler_ok = True
+        
+    # 3. Browser status
+    browser_ok = False
+    try:
+        from playwright.sync_api import sync_playwright
+        browser_ok = True
+    except ImportError:
+        pass
+        
+    # 4. MCP / Email / Calendar status
+    mcp_ok = mcp_adapter is not None
+    email_ok = False
+    calendar_ok = False
+    if mcp_ok:
+        email_ok = mcp_adapter.get_server("email") is not None
+        calendar_ok = mcp_adapter.get_server("calendar") is not None
+        
+    return {
+        "browser": {"available": browser_ok, "status": "ready" if browser_ok else "unavailable"},
+        "email": {"available": email_ok, "status": "ready" if email_ok else "unavailable"},
+        "calendar": {"available": calendar_ok, "status": "ready" if calendar_ok else "unavailable"},
+        "rag": {"available": rag_ok, "status": "ready" if rag_ok else "unavailable"},
+        "scheduler": {"available": scheduler_ok, "status": "ready" if scheduler_ok else "unavailable"},
+        "mcp": {
+            "available": mcp_ok,
+            "error": mcp_error
+        }
+    }
 
 
 # ── Serve the UI ──────────────────────────────────────────────────────────────
