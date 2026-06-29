@@ -46,9 +46,9 @@ GET_CURRENT_DATETIME = Tool(
 def _web_search(query: str) -> str:
     """Search the web via DuckDuckGo and return top 3 results."""
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
     except ImportError:
-        return json.dumps({"error": "duckduckgo-search not installed. Run: pip install duckduckgo-search"})
+        return json.dumps({"error": "ddgs not installed. Run: pip install ddgs"})
 
     try:
         ddgs = DDGS()
@@ -92,10 +92,12 @@ WEB_SEARCH = Tool(
 def _get_weather(location: str) -> str:
     """Get current weather for a city via wttr.in (free, no API key)."""
     try:
+        import ssl
         encoded = urllib.parse.quote(location)
         url = f"https://wttr.in/{encoded}?format=j1"
         req = urllib.request.Request(url, headers={"User-Agent": "NovaAssistant/1.0"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        ctx = ssl._create_unverified_context()
+        with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
             data = json.loads(resp.read().decode())
     except Exception as e:
         return json.dumps({"error": f"Weather lookup failed: {str(e)}"})
