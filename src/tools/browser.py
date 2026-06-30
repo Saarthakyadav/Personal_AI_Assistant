@@ -21,25 +21,26 @@ from typing import Optional
 from src.tools import Tool
 
 
-def _run_async(coro):
-    """Run an async coroutine from a sync context safely."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # We're inside an async context — run in a thread
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(asyncio.run, coro)
-                return future.result(timeout=60)
-        else:
-            return loop.run_until_complete(coro)
-    except RuntimeError:
-        return asyncio.run(coro)
+def _run_in_thread(func, *args, **kwargs):
+    """Run a sync function in a brand new thread to hide it from FastAPI's asyncio loop."""
+    result = []
+    error = []
+    def wrapper():
+        try:
+            result.append(func(*args, **kwargs))
+        except Exception as e:
+            error.append(e)
+    t = threading.Thread(target=wrapper)
+    t.start()
+    t.join()
+    if error:
+        raise error[0]
+    return result[0]
 
 
 # ── 1. browser_navigate ───────────────────────────────────────────────────────
 
-def _browser_navigate(url: str) -> str:
+def _browser_navigate_inner(url: str) -> str:
     """Navigate to a URL and return the page title + first 500 chars of text."""
     try:
         from playwright.sync_api import sync_playwright
@@ -65,6 +66,9 @@ def _browser_navigate(url: str) -> str:
     except Exception as e:
         return json.dumps({"error": f"Navigation failed: {str(e)}"})
 
+def _browser_navigate(url: str) -> str:
+    return _run_in_thread(_browser_navigate_inner, url)
+
 
 BROWSER_NAVIGATE = Tool(
     name="browser_navigate",
@@ -86,7 +90,7 @@ BROWSER_NAVIGATE = Tool(
 
 # ── 2. browser_extract_text ───────────────────────────────────────────────────
 
-def _browser_extract_text(url: str, selector: Optional[str] = None) -> str:
+def _browser_extract_text_inner(url: str, selector: Optional[str] = None) -> str:
     """Extract text content from a URL, optionally from a specific CSS selector."""
     try:
         from playwright.sync_api import sync_playwright
@@ -119,6 +123,9 @@ def _browser_extract_text(url: str, selector: Optional[str] = None) -> str:
     except Exception as e:
         return json.dumps({"error": f"Text extraction failed: {str(e)}"})
 
+def _browser_extract_text(url: str, selector: Optional[str] = None) -> str:
+    return _run_in_thread(_browser_extract_text_inner, url, selector)
+
 
 BROWSER_EXTRACT_TEXT = Tool(
     name="browser_extract_text",
@@ -141,7 +148,7 @@ BROWSER_EXTRACT_TEXT = Tool(
 
 # ── 3. browser_search_web ─────────────────────────────────────────────────────
 
-def _browser_search_web(query: str, site: Optional[str] = None) -> str:
+def _browser_search_web_inner(query: str, site: Optional[str] = None) -> str:
     """
     Search the web using DuckDuckGo via a real browser.
     FIX Bug #8: replaced brittle Google scraping with DuckDuckGo's stabler DOM.
@@ -195,6 +202,9 @@ def _browser_search_web(query: str, site: Optional[str] = None) -> str:
     except Exception as e:
         return json.dumps({"error": f"Browser search failed: {str(e)}"})
 
+def _browser_search_web(query: str, site: Optional[str] = None) -> str:
+    return _run_in_thread(_browser_search_web_inner, query, site)
+
 
 BROWSER_SEARCH_WEB = Tool(
     name="browser_search_web",
@@ -222,12 +232,27 @@ BOOKING_SITES = {
     "irctc": {
         "name": "IRCTC",
         "search_url": "https://www.irctc.co.in/nget/train-search",
-        "note": "IRCTC requires login. Navigate to the site and fill details manually.",
+        "note": "IRCTC requires login. (May block bots)",
+    },
+    "confirmtkt": {
+        "name": "ConfirmTkt (IRCTC Alternative)",
+        "search_url": "https://www.confirmtkt.com",
+        "note": "ConfirmTkt for train tickets (Bot friendly).",
     },
     "makemytrip": {
         "name": "MakeMyTrip",
         "search_url": "https://www.makemytrip.com",
-        "note": "MakeMyTrip for flights, hotels, buses.",
+        "note": "MakeMyTrip for flights. (May block bots)",
+    },
+    "ixigo": {
+        "name": "Ixigo (Travel Alternative)",
+        "search_url": "https://www.ixigo.com",
+        "note": "Ixigo for flights and trains (Bot friendly).",
+    },
+    "cleartrip": {
+        "name": "Cleartrip (Flight Alternative)",
+        "search_url": "https://www.cleartrip.com",
+        "note": "Cleartrip for flights (Bot friendly).",
     },
     "bookmyshow": {
         "name": "BookMyShow",
@@ -239,6 +264,11 @@ BOOKING_SITES = {
         "search_url": "https://www.amazon.in",
         "note": "Amazon for online shopping.",
     },
+    "flipkart": {
+        "name": "Flipkart",
+        "search_url": "https://www.flipkart.com",
+        "note": "Flipkart for online shopping (Bot friendly).",
+    },
     "swiggy": {
         "name": "Swiggy",
         "search_url": "https://www.swiggy.com",
@@ -247,7 +277,12 @@ BOOKING_SITES = {
     "zomato": {
         "name": "Zomato",
         "search_url": "https://www.zomato.com",
-        "note": "Zomato for food delivery and restaurant discovery.",
+        "note": "Zomato for food delivery. (May block bots)",
+    },
+    "blinkit": {
+        "name": "Blinkit",
+        "search_url": "https://blinkit.com",
+        "note": "Blinkit for quick groceries and food (Bot friendly).",
     },
 }
 
@@ -446,10 +481,57 @@ def _get_direct_search_url(site_key: str, task_type: str, details: dict) -> Opti
         else:
             return f"https://in.bookmyshow.com/explore/movies-{city}"
             
+    elif site_key == "flipkart":
+        query = details.get("query") or details.get("product") or ""
+        if query:
+            return f"https://www.flipkart.com/search?q={urllib.parse.quote(query)}"
+            
+    elif site_key == "blinkit":
+        query = details.get("query") or details.get("food") or ""
+        if query:
+            return f"https://blinkit.com/s/?q={urllib.parse.quote(query)}"
+            
+    elif site_key == "ixigo":
+        # Supports flights or trains
+        if task_type == "train":
+            from_st = details.get("from", "NDLS").strip().upper()
+            to_st = details.get("to", "BCT").strip().upper()
+            date = details.get("date", "").strip().replace("-", "").replace("/", "")
+            return f"https://www.ixigo.com/search/result/train/{urllib.parse.quote(from_st)}/{urllib.parse.quote(to_st)}/{date}//1/0/0/0/ALL"
+        else:
+            from_code = details.get("from", "DEL").strip().upper()
+            to_code = details.get("to", "BOM").strip().upper()
+            date = details.get("date", "").strip().replace("-", "").replace("/", "")
+            return f"https://www.ixigo.com/search/result/flight?from={urllib.parse.quote(from_code)}&to={urllib.parse.quote(to_code)}&date={date}&returnDate=&adults=1&children=0&infants=0&class=e&source=Search%20Form"
+            
+    elif site_key == "confirmtkt":
+        from_st = details.get("from", "NDLS").strip().upper()
+        to_st = details.get("to", "BCT").strip().upper()
+        date = details.get("date", "").strip()
+        # Confirmtkt format: https://www.confirmtkt.com/train-tickets/new-delhi-ndls-to-mumbai-central-bct?Date=10-Jul-2026
+        import datetime
+        try:
+            if "/" in date:
+                dt = datetime.datetime.strptime(date, "%d/%m/%Y")
+            else:
+                dt = datetime.datetime.strptime(date, "%Y-%m-%d")
+            formatted_date = dt.strftime("%d-%b-%Y")
+        except:
+            formatted_date = date
+        return f"https://www.confirmtkt.com/train-tickets/{urllib.parse.quote(from_st)}-to-{urllib.parse.quote(to_st)}?Date={formatted_date}"
+        
+    elif site_key == "cleartrip":
+        from_city = details.get("from", "DEL").strip().upper()
+        to_city = details.get("to", "BOM").strip().upper()
+        date = details.get("date", "").strip()
+        if "/" in date:
+            date = date.replace("/", ":")
+        return f"https://www.cleartrip.com/flights/results?from={from_city}&to={to_city}&depart_date={date}&adults=1&childs=0&infants=0&class=Economy&airline=&carrier=&intl=n&sd=1592659103859"
+            
     return None
 
 
-def _browser_search_and_book(
+def _browser_search_and_book_inner(
     site: str,
     task_type: str,
     details: dict,
@@ -531,6 +613,14 @@ def _browser_search_and_book(
     except Exception as e:
         return json.dumps({"error": f"Browser automation failed: {str(e)}", "site": site})
 
+def _browser_search_and_book(
+    site: str,
+    task_type: str,
+    details: dict,
+    action: str = "search",
+) -> str:
+    return _run_in_thread(_browser_search_and_book_inner, site, task_type, details, action)
+
 
 BROWSER_SEARCH_AND_BOOK = Tool(
     name="browser_search_and_book",
@@ -548,7 +638,7 @@ BROWSER_SEARCH_AND_BOOK = Tool(
         "properties": {
             "site": {
                 "type": "string",
-                "description": "Site key: 'irctc', 'makemytrip', 'bookmyshow', 'amazon', 'swiggy', 'zomato'",
+                "description": "Site key: 'irctc', 'confirmtkt', 'makemytrip', 'ixigo', 'cleartrip', 'bookmyshow', 'amazon', 'flipkart', 'swiggy', 'zomato', 'blinkit'",
             },
             "task_type": {
                 "type": "string",

@@ -48,7 +48,7 @@ class Orchestrator:
         self._client = groq_client
         self._full_registry = tool_registry
         self._memory = memory
-        self._model = "llama-3.3-70b-versatile"
+        self._model = "llama-3.1-8b-instant"
 
     # ── Public API ────────────────────────────────────────────────────────────
 

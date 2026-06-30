@@ -2,8 +2,8 @@
 """
 Persistent user profile memory for Nova.
 
-Stores facts about the user (name, preferences, interests, etc.) in a local
-JSON file so they survive across sessions.  Facts are extracted from
+Stores facts about the user (name, preferences, interests, etc.) in a MongoDB
+collection so they survive across sessions.  Facts are extracted from
 conversations via a lightweight LLM call and injected into the system prompt
 on every query.
 """
@@ -39,10 +39,10 @@ Assistant: {assistant_msg}
 
 
 class UserMemory:
-    """Thread-safe persistent user-profile memory backed by a JSON file."""
+    """Thread-safe persistent user-profile memory backed by MongoDB."""
 
-    def __init__(self, filepath: str = "user_memory.json"):
-        self._filepath = filepath
+    def __init__(self, filepath: str = "user_memory.json", user_id: str = "default"):
+        self._user_id = user_id
         self._lock = threading.Lock()
         self._facts: List[str] = []
         self._load()
@@ -71,7 +71,7 @@ class UserMemory:
         user_msg: str,
         assistant_msg: str,
         groq_client,
-        model: str = "llama-3.3-70b-versatile",
+        model: str = "llama-3.1-8b-instant",
     ) -> List[str]:
         """Call the LLM to extract new user facts, store them, and return them.
 
@@ -149,30 +149,28 @@ class UserMemory:
         return False
 
     def _load(self):
-        """Load facts from disk.  Missing / corrupt file → start fresh."""
-        if not os.path.exists(self._filepath):
-            self._facts = []
-            return
-
+        """Load facts from MongoDB."""
+        from src.database import db_manager
         try:
-            with open(self._filepath, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            self._facts = data.get("facts", [])
+            col = db_manager.get_collection("memory")
+            doc = col.find_one({"user_id": self._user_id})
+            self._facts = doc.get("facts", []) if doc else []
         except Exception as e:
-            print(f"   ⚠️ Could not load memory file: {e}")
+            print(f"   ⚠️ Could not load memory from DB: {e}")
             self._facts = []
 
     def _save_unlocked(self):
-        """Persist facts to disk.  Caller must hold self._lock."""
+        """Persist facts to MongoDB. Caller must hold self._lock."""
+        from src.database import db_manager
         try:
-            data = {
-                "facts": self._facts,
-                "updated_at": datetime.now().isoformat(),
-            }
-            with open(self._filepath, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            col = db_manager.get_collection("memory")
+            col.update_one(
+                {"user_id": self._user_id},
+                {"$set": {"facts": self._facts, "updated_at": datetime.now().isoformat()}},
+                upsert=True
+            )
         except Exception as e:
-            print(f"   ⚠️ Could not save memory file: {e}")
+            print(f"   ⚠️ Could not save memory to DB: {e}")
 
     @staticmethod
     def _parse_facts(raw: str) -> List[str]:

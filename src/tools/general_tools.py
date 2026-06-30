@@ -141,12 +141,14 @@ def _http_fetch(url: str, method: str = "GET", max_chars: int = 5000) -> str:
         max_chars = 5000
 
     try:
+        import ssl
         req = urllib.request.Request(
             url,
             headers={"User-Agent": "NovaAssistant/1.0"},
             method=method.upper(),
         )
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        ctx = ssl._create_unverified_context()
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
             content_type = resp.headers.get("Content-Type", "")
             body = resp.read().decode("utf-8", errors="replace")
 

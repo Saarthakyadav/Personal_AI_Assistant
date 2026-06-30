@@ -38,7 +38,7 @@ class AgentCore:
         memory: UserMemory,
         tool_registry: ToolRegistry,
         max_steps: int = 10,
-        model: str = "llama-3.3-70b-versatile",
+        model: str = "llama-3.1-8b-instant",
     ):
         self._client = groq_client
         self._memory = memory
