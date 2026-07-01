@@ -12,8 +12,8 @@ from src.tools.general_tools import GENERAL_TOOLS
 from src.tools.builtins import ALL_BUILTIN_TOOLS
 from src.tools.browser import BROWSER_TOOLS
 
-# Import Google tools via MCP Adapter
-from src.tools.mcp_adapter import MCPPluginAdapter
+# Import Google tools via Plugin Adapter
+from src.tools.plugin_adapter import PluginAdapter
 from src.tools.email_tool import EMAIL_TOOLS
 from src.tools.calendar_tool import CALENDAR_TOOLS
 
@@ -32,11 +32,11 @@ def run_cli():
     for tool in BROWSER_TOOLS:
         registry.register(tool)
     
-    # Setup MCP Adapter for Google Tools
-    mcp = MCPPluginAdapter()
-    mcp.register_tools("email", EMAIL_TOOLS)
-    mcp.register_tools("calendar", CALENDAR_TOOLS)
-    mcp.install_into_registry(registry)
+    # Setup Plugin Adapter for Google Tools
+    plugin = PluginAdapter()
+    plugin.register_tools("email", EMAIL_TOOLS)
+    plugin.register_tools("calendar", CALENDAR_TOOLS)
+    plugin.install_into_registry(registry)
     
     # 3. Setup Groq LLM
     groq_api_key = os.environ.get("GROQ_API_KEY")

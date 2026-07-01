@@ -147,7 +147,7 @@ def _http_fetch(url: str, method: str = "GET", max_chars: int = 5000) -> str:
             headers={"User-Agent": "NovaAssistant/1.0"},
             method=method.upper(),
         )
-        ctx = ssl._create_unverified_context()
+        ctx = ssl.create_default_context()
         with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
             content_type = resp.headers.get("Content-Type", "")
             body = resp.read().decode("utf-8", errors="replace")

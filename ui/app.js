@@ -1067,7 +1067,7 @@
             chip.className = 'status-chip warn';
             chip.innerHTML = '<span class="dot"></span>disabled';
             if (comp === 'email' || comp === 'calendar') {
-              chip.title = data.mcp && data.mcp.error ? `Error: ${data.mcp.error}` : 'MCP adapter not initialized';
+              chip.title = data.plugin && data.plugin.error ? `Error: ${data.plugin.error}` : 'Plugin adapter not initialized';
             } else if (comp === 'rag') {
               chip.title = 'RAG not available. Install dependencies: chromadb sentence-transformers pymupdf';
             } else if (comp === 'scheduler') {

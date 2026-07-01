@@ -39,12 +39,23 @@ Assistant: {assistant_msg}
 
 
 class UserMemory:
-    """Thread-safe persistent user-profile memory backed by MongoDB."""
+    """Thread-safe persistent user-profile memory.
+
+    Uses MongoDB when MONGODB_URI is set, otherwise falls back to a local
+    JSON file at *filepath*.
+    """
 
     def __init__(self, filepath: str = "user_memory.json", user_id: str = "default"):
         self._user_id = user_id
+        self._filepath = filepath
         self._lock = threading.Lock()
         self._facts: List[str] = []
+        
+        # Decide backend: Mongo if MONGODB_URI is configured, else JSON file
+        self._use_mongo = bool(os.getenv("MONGODB_URI"))
+        if not self._use_mongo:
+            print("⚠️  MONGODB_URI not set — using local JSON file for memory")
+
         self._load()
 
     # ── Public API ────────────────────────────────────────────────────────
@@ -149,7 +160,22 @@ class UserMemory:
         return False
 
     def _load(self):
-        """Load facts from MongoDB."""
+        """Load facts from the configured backend."""
+        if self._use_mongo:
+            self._load_mongo()
+        else:
+            self._load_file()
+
+    def _save_unlocked(self):
+        """Persist facts. Caller must hold self._lock."""
+        if self._use_mongo:
+            self._save_mongo()
+        else:
+            self._save_file()
+
+    # ── MongoDB backend ───────────────────────────────────────────────────
+
+    def _load_mongo(self):
         from src.database import db_manager
         try:
             col = db_manager.get_collection("memory")
@@ -159,8 +185,7 @@ class UserMemory:
             print(f"   ⚠️ Could not load memory from DB: {e}")
             self._facts = []
 
-    def _save_unlocked(self):
-        """Persist facts to MongoDB. Caller must hold self._lock."""
+    def _save_mongo(self):
         from src.database import db_manager
         try:
             col = db_manager.get_collection("memory")
@@ -171,6 +196,54 @@ class UserMemory:
             )
         except Exception as e:
             print(f"   ⚠️ Could not save memory to DB: {e}")
+
+    # ── JSON-file backend ─────────────────────────────────────────────────
+
+    def _load_file(self):
+        if not os.path.exists(self._filepath):
+            self._facts = []
+            return
+        try:
+            with open(self._filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # Support both flat list and {user_id: {facts: [...]}} formats
+            if isinstance(data, list):
+                self._facts = data
+            elif isinstance(data, dict):
+                user_data = data.get(self._user_id, {})
+                if isinstance(user_data, dict):
+                    self._facts = user_data.get("facts", [])
+                elif isinstance(user_data, list):
+                    self._facts = user_data
+                else:
+                    self._facts = []
+            else:
+                self._facts = []
+        except Exception as e:
+            print(f"   ⚠️ Could not load memory from file: {e}")
+            self._facts = []
+
+    def _save_file(self):
+        try:
+            # Load existing file to preserve other users' data
+            existing: dict = {}
+            if os.path.exists(self._filepath):
+                try:
+                    with open(self._filepath, "r", encoding="utf-8") as f:
+                        existing = json.load(f)
+                    if not isinstance(existing, dict):
+                        existing = {}
+                except Exception:
+                    existing = {}
+
+            existing[self._user_id] = {
+                "facts": self._facts,
+                "updated_at": datetime.now().isoformat(),
+            }
+            with open(self._filepath, "w", encoding="utf-8") as f:
+                json.dump(existing, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"   ⚠️ Could not save memory to file: {e}")
 
     @staticmethod
     def _parse_facts(raw: str) -> List[str]:

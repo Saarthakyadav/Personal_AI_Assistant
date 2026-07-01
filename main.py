@@ -104,19 +104,19 @@ try:
 except ImportError as e:
     print(f"⚠️ General tools not available: {e}")
 
-# Register Email/Calendar via MCP
+# Register Email/Calendar via Plugin Adapter
 try:
     from src.tools.email_tool import EMAIL_TOOLS
     from src.tools.calendar_tool import CALENDAR_TOOLS
-    from src.tools.mcp_adapter import MCPPluginAdapter
+    from src.tools.plugin_adapter import PluginAdapter
     
-    mcp_adapter = MCPPluginAdapter()
-    mcp_adapter.register_tools("email", EMAIL_TOOLS)
-    mcp_adapter.register_tools("calendar", CALENDAR_TOOLS)
-    installed_count = mcp_adapter.install_into_registry(tool_registry)
-    print(f"✅ MCP tools registered: {installed_count} tools across 2 servers")
+    plugin_adapter = PluginAdapter()
+    plugin_adapter.register_tools("email", EMAIL_TOOLS)
+    plugin_adapter.register_tools("calendar", CALENDAR_TOOLS)
+    installed_count = plugin_adapter.install_into_registry(tool_registry)
+    print(f"✅ Plugin tools registered: {installed_count} tools across 2 servers")
 except ImportError as e:
-    print(f"⚠️ MCP tools not available: {e}")
+    print(f"⚠️ Plugin tools not available: {e}")
 
 # ── Microphone ───────────────────────────────────────────────
 print("\n🎤 Initializing wake word microphone...")

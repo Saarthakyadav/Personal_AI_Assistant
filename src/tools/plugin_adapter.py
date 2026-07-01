@@ -1,13 +1,12 @@
-# src/tools/mcp_adapter.py
+# src/tools/plugin_adapter.py
 """
-MCP-Style Plugin Adapter for Nova.
+Plugin Adapter for Nova.
 
-Provides a lightweight Model Context Protocol-inspired plugin layer that groups
+Provides a lightweight plugin layer that groups
 tools into named "servers" (e.g. 'calendar', 'email').  This matches the
-Architecture v3 flowchart box: "MCP servers (plug-in) — calendar · email".
+Architecture v3 flowchart box: "Plugin servers (plug-in) — calendar · email".
 
-Not a full network-protocol MCP implementation, but provides the architectural
-abstraction: tool grouping, server discovery, and unified routing.
+Provides the architectural abstraction: tool grouping, server discovery, and unified routing.
 """
 
 import json
@@ -15,7 +14,7 @@ from typing import Dict, List, Optional, Callable
 from src.tools import Tool, ToolRegistry
 
 
-class MCPServer:
+class PluginServer:
     """A named group of tools that acts as a plugin server."""
 
     def __init__(self, name: str, description: str):
@@ -49,18 +48,18 @@ class MCPServer:
         }
 
 
-class MCPPluginAdapter:
+class PluginAdapter:
     """
-    Manages multiple MCP-style plugin servers and registers their tools
+    Manages multiple plugin servers and registers their tools
     into the main ToolRegistry.
     """
 
     def __init__(self):
-        self._servers: Dict[str, MCPServer] = {}
+        self._servers: Dict[str, PluginServer] = {}
 
-    def create_server(self, name: str, description: str) -> MCPServer:
+    def create_server(self, name: str, description: str) -> PluginServer:
         """Create and register a new plugin server."""
-        server = MCPServer(name=name, description=description)
+        server = PluginServer(name=name, description=description)
         self._servers[name] = server
         return server
 
@@ -79,14 +78,14 @@ class MCPPluginAdapter:
             for tool_name in server.list_tools():
                 tool = server.get_tool(tool_name)
                 if tool:
-                    # Wrap handler to route via MCP execute (matching flowchart architectural routing)
-                    def make_mcp_handler(s_name=server.name, t_name=tool_name):
-                        def mcp_handler(*args, **kwargs):
-                            print(f"🔌 [MCP Route] server: '{s_name}' -> tool: '{t_name}'")
+                    # Wrap handler to route via Plugin execute
+                    def make_plugin_handler(s_name=server.name, t_name=tool_name):
+                        def plugin_handler(*args, **kwargs):
+                            print(f"🔌 [Plugin Route] server: '{s_name}' -> tool: '{t_name}'")
                             return self.execute(s_name, t_name, kwargs)
-                        return mcp_handler
+                        return plugin_handler
 
-                    tool.handler = make_mcp_handler()
+                    tool.handler = make_plugin_handler()
                     registry.register(tool)
                     count += 1
         return count
@@ -95,7 +94,7 @@ class MCPPluginAdapter:
         """Return metadata for all registered servers."""
         return [server.to_dict() for server in self._servers.values()]
 
-    def get_server(self, name: str) -> Optional[MCPServer]:
+    def get_server(self, name: str) -> Optional[PluginServer]:
         return self._servers.get(name)
 
     def get_server_for_tool(self, tool_name: str) -> Optional[str]:
@@ -109,7 +108,7 @@ class MCPPluginAdapter:
         """Execute a tool via its server. Returns JSON result or error."""
         server = self._servers.get(server_name)
         if not server:
-            return json.dumps({"error": f"MCP server '{server_name}' not found."})
+            return json.dumps({"error": f"Plugin server '{server_name}' not found."})
 
         tool = server.get_tool(tool_name)
         if not tool:
@@ -128,10 +127,10 @@ class MCPPluginAdapter:
                 result = json.dumps(result)
             return result
         except Exception as e:
-            return json.dumps({"error": f"MCP tool '{tool_name}' failed: {str(e)}"})
+            return json.dumps({"error": f"Plugin tool '{tool_name}' failed: {str(e)}"})
 
     def __repr__(self):
         servers = ", ".join(
             f"{s.name}({s.tool_count})" for s in self._servers.values()
         )
-        return f"MCPPluginAdapter(servers=[{servers}])"
+        return f"PluginAdapter(servers=[{servers}])"

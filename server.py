@@ -28,7 +28,7 @@ if sys.stdout.encoding != 'utf-8':
 if sys.stderr.encoding != 'utf-8':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect, Body
+from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect, Body, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,6 +44,12 @@ from src.tools.builtins import ALL_BUILTIN_TOOLS
 from src.tools.reminders import ReminderService, create_reminder_tool
 
 load_dotenv()
+
+# Startup message for Auth mode
+if os.getenv("AUTH_ENABLED") == "true":
+    print("🔒 Auth mode: ENABLED (routes protected)")
+else:
+    print("🔓 Auth mode: DISABLED (routes open)")
 
 # ── Initialize all backend services ──────────────────────────────────────────
 
@@ -65,8 +71,8 @@ print(f"✅ User memory ready ({memory.fact_count} fact(s) loaded)")
 
 # Tool registry
 tool_registry = ToolRegistry()
-mcp_adapter = None
-mcp_error = None
+plugin_adapter = None
+plugin_error = None
 for tool in ALL_BUILTIN_TOOLS:
     tool_registry.register(tool)
 
@@ -105,17 +111,17 @@ except ImportError as e:
 try:
     from src.tools.email_tool import EMAIL_TOOLS
     from src.tools.calendar_tool import CALENDAR_TOOLS
-    from src.tools.mcp_adapter import MCPPluginAdapter
+    from src.tools.plugin_adapter import PluginAdapter
     
-    mcp_adapter = MCPPluginAdapter()
-    mcp_adapter.register_tools("email", EMAIL_TOOLS)
-    mcp_adapter.register_tools("calendar", CALENDAR_TOOLS)
+    plugin_adapter = PluginAdapter()
+    plugin_adapter.register_tools("email", EMAIL_TOOLS)
+    plugin_adapter.register_tools("calendar", CALENDAR_TOOLS)
     
-    installed_count = mcp_adapter.install_into_registry(tool_registry)
-    print(f"✅ MCP Plugin tools registered via adapter: {installed_count} tools across 2 servers")
+    installed_count = plugin_adapter.install_into_registry(tool_registry)
+    print(f"✅ Plugin tools registered via adapter: {installed_count} tools across 2 servers")
 except Exception as e:
-    mcp_error = str(e)
-    print(f"⚠️  MCP / Email / Calendar tools not available: {e}")
+    plugin_error = str(e)
+    print(f"⚠️  Plugin / Email / Calendar tools not available: {e}")
 
 # ── Optional Phase 4: RAG tools ───────────────────────────────────────────────
 rag_retriever = None
@@ -344,10 +350,17 @@ class TaskCreateRequest(BaseModel):
     trigger_args: dict  # e.g. {"minutes": 30} or {"hour": 9, "minute": 0}
 
 
+from src.auth import oauth2_scheme, get_current_user
+
+def check_auth_dependency(token: Optional[str] = Depends(oauth2_scheme)):
+    if os.getenv("AUTH_ENABLED") == "true":
+        return get_current_user(token)
+    return None
+
 # ── Chat endpoint ─────────────────────────────────────────────────────────────
 
 @app.post("/api/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+def chat(req: ChatRequest, current_user: Optional[dict] = Depends(check_auth_dependency)):
     """Send a message to Nova and get a response."""
     message = req.message.strip()
     if not message:
@@ -802,29 +815,29 @@ def cancel_task(task_id: str):
 
 # ── MCP Plugin endpoints ──────────────────────────────────────────────────────
 
-@app.get("/api/mcp/servers")
-def list_mcp_servers():
-    """List all registered MCP-style plugin servers."""
-    if mcp_adapter is None:
+@app.get("/api/plugins/servers")
+def list_plugin_servers():
+    """List all registered Plugin-style servers."""
+    if plugin_adapter is None:
         return {
             "servers": [],
             "available": False,
-            "error": mcp_error or "MCP adapter not initialized"
+            "error": plugin_error or "Plugin adapter not initialized"
         }
-    return {"servers": mcp_adapter.list_servers(), "available": True}
+    return {"servers": plugin_adapter.list_servers(), "available": True}
 
 
-@app.get("/api/mcp/servers/{server_name}/tools")
-def list_mcp_server_tools(server_name: str):
-    """List tools registered for a specific MCP server."""
-    if mcp_adapter is None:
+@app.get("/api/plugins/servers/{server_name}/tools")
+def list_plugin_server_tools(server_name: str):
+    """List tools registered for a specific plugin server."""
+    if plugin_adapter is None:
         raise HTTPException(
             status_code=503,
-            detail=f"MCP adapter not initialized. Reason: {mcp_error or 'Not loaded'}"
+            detail=f"Plugin adapter not initialized. Reason: {plugin_error or 'Not loaded'}"
         )
-    server = mcp_adapter.get_server(server_name)
+    server = plugin_adapter.get_server(server_name)
     if not server:
-        raise HTTPException(status_code=404, detail=f"MCP server '{server_name}' not found")
+        raise HTTPException(status_code=404, detail=f"Plugin server '{server_name}' not found")
     
     tools = []
     for tool_name in server.list_tools():
@@ -839,21 +852,21 @@ def list_mcp_server_tools(server_name: str):
     return {"server": server_name, "tools": tools}
 
 
-@app.post("/api/mcp/servers/{server_name}/tools/{tool_name}/execute")
-def execute_mcp_tool(server_name: str, tool_name: str, arguments: dict = Body(default={})):
-    """Execute an MCP tool directly."""
-    if mcp_adapter is None:
+@app.post("/api/plugins/servers/{server_name}/tools/{tool_name}/execute")
+def execute_plugin_tool(server_name: str, tool_name: str, arguments: dict = Body(default={})):
+    """Execute a plugin tool directly."""
+    if plugin_adapter is None:
         raise HTTPException(
             status_code=503,
-            detail=f"MCP adapter not initialized. Reason: {mcp_error or 'Not loaded'}"
+            detail=f"Plugin adapter not initialized. Reason: {plugin_error or 'Not loaded'}"
         )
-    server = mcp_adapter.get_server(server_name)
+    server = plugin_adapter.get_server(server_name)
     if not server:
-        raise HTTPException(status_code=404, detail=f"MCP server '{server_name}' not found")
+        raise HTTPException(status_code=404, detail=f"Plugin server '{server_name}' not found")
     
     tool = server.get_tool(tool_name)
     if not tool:
-        raise HTTPException(status_code=404, detail=f"MCP tool '{tool_name}' not found on server '{server_name}'")
+        raise HTTPException(status_code=404, detail=f"Plugin tool '{tool_name}' not found on server '{server_name}'")
         
     if tool.requires_confirmation:
         raise HTTPException(
@@ -862,7 +875,7 @@ def execute_mcp_tool(server_name: str, tool_name: str, arguments: dict = Body(de
         )
         
     try:
-        result = mcp_adapter.execute(server_name, tool_name, arguments)
+        result = plugin_adapter.execute(server_name, tool_name, arguments)
         return json.loads(result)
     except json.JSONDecodeError:
         return {"result": result}
@@ -891,13 +904,13 @@ def get_system_status():
     except ImportError:
         pass
         
-    # 4. MCP / Email / Calendar status
-    mcp_ok = mcp_adapter is not None
+    # 4. Plugin / Email / Calendar status
+    plugin_ok = plugin_adapter is not None
     email_ok = False
     calendar_ok = False
-    if mcp_ok:
-        email_ok = mcp_adapter.get_server("email") is not None
-        calendar_ok = mcp_adapter.get_server("calendar") is not None
+    if plugin_ok:
+        email_ok = plugin_adapter.get_server("email") is not None
+        calendar_ok = plugin_adapter.get_server("calendar") is not None
         
     return {
         "browser": {"available": browser_ok, "status": "ready" if browser_ok else "unavailable"},
@@ -905,11 +918,43 @@ def get_system_status():
         "calendar": {"available": calendar_ok, "status": "ready" if calendar_ok else "unavailable"},
         "rag": {"available": rag_ok, "status": "ready" if rag_ok else "unavailable"},
         "scheduler": {"available": scheduler_ok, "status": "ready" if scheduler_ok else "unavailable"},
-        "mcp": {
-            "available": mcp_ok,
-            "error": mcp_error
+        "plugin": {
+            "available": plugin_ok,
+            "error": plugin_error
         }
     }
+
+
+# ── Auth Endpoints ────────────────────────────────────────────────────────────
+
+from src.auth import get_password_hash, verify_password, create_access_token, get_current_user
+from src.models import UserCreate, UserInDB, Token
+from src.database import db_manager
+
+@app.post("/api/auth/register", response_model=dict)
+def register_user(user: UserCreate):
+    col = db_manager.get_collection("users")
+    if col.find_one({"username": user.username}):
+        raise HTTPException(status_code=400, detail="Username already registered")
+    
+    hashed = get_password_hash(user.password)
+    user_in_db = UserInDB(username=user.username, hashed_password=hashed)
+    col.insert_one(user_in_db.model_dump() if hasattr(user_in_db, "model_dump") else user_in_db.dict())
+    return {"message": "User registered successfully", "username": user.username}
+
+@app.post("/api/auth/login", response_model=Token)
+def login_user(user: UserCreate):
+    col = db_manager.get_collection("users")
+    db_user = col.find_one({"username": user.username})
+    if not db_user or not verify_password(user.password, db_user["hashed_password"]):
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+    
+    access_token = create_access_token(data={"sub": user.username})
+    return Token(access_token=access_token, token_type="bearer")
+
+@app.get("/api/auth/me", response_model=dict)
+def get_me(current_user: dict = Depends(get_current_user)):
+    return current_user
 
 
 # ── Serve the UI ──────────────────────────────────────────────────────────────
