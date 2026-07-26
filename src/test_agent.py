@@ -114,5 +114,24 @@ class TestAgentCore(unittest.TestCase):
         result = self.agent.run("Send email to Bob", [], confirm_callback=mock_confirm)
         self.assertEqual(result, "Okay, I cancelled sending the email.")
 
+    def test_describe_tool_call_send_email_with_draft_id(self):
+        """Test that _describe_tool_call handles send_email with draft_id correctly using cache."""
+        from src.tools.email_tool import _SMTP_DRAFT_CACHE
+        _SMTP_DRAFT_CACHE["test-draft-id-123"] = {
+            "to": "alice@test.com",
+            "subject": "Hello Alice"
+        }
+        try:
+            desc = self.agent._describe_tool_call("send_email", {"draft_id": "test-draft-id-123"})
+            self.assertIn("alice@test.com", desc)
+            self.assertIn("Hello Alice", desc)
+            self.assertIn("test-draft-id-123", desc)
+            
+            # Test fallback if draft is not in cache or API
+            desc_fallback = self.agent._describe_tool_call("send_email", {"draft_id": "nonexistent-draft"})
+            self.assertEqual(desc_fallback, "send email draft nonexistent-draft")
+        finally:
+            _SMTP_DRAFT_CACHE.pop("test-draft-id-123", None)
+
 if __name__ == "__main__":
     unittest.main()

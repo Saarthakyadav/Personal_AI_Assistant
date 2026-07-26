@@ -48,7 +48,8 @@ class Orchestrator:
         self._client = groq_client
         self._full_registry = tool_registry
         self._memory = memory
-        self._model = "llama-3.1-8b-instant"
+        import os
+        self._model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -58,6 +59,7 @@ class Orchestrator:
         agents: Optional[List[str]] = None,
         confirm_callback: Optional[Any] = None,
         step_callback=None,
+        conversation_history: Optional[List[dict]] = None,
     ) -> dict:
         """
         Plan and execute a multi-agent workflow.
@@ -67,6 +69,7 @@ class Orchestrator:
             agents:         Optional list of agent names to use (auto-selected if None).
             confirm_callback: Optional confirmation callback for guardrails.
             step_callback:  Optional (event_type, detail) → None callback for live UI.
+            conversation_history: Optional rolling conversation history.
 
         Returns:
             dict with keys: result, steps, agents_used, tools_used
@@ -106,6 +109,7 @@ class Orchestrator:
                 task=full_task,
                 confirm_callback=confirm_callback,
                 step_callback=step_callback,
+                conversation_history=conversation_history,
             )
 
             results.append({
@@ -185,6 +189,7 @@ Example:
         task: str,
         confirm_callback: Optional[Any] = None,
         step_callback=None,
+        conversation_history: Optional[List[dict]] = None,
     ) -> dict:
         """Run a specialist sub-agent with a filtered tool set."""
         import types
@@ -239,7 +244,7 @@ Example:
         try:
             result = sub_agent.run(
                 user_message=task,
-                conversation_history=[],
+                conversation_history=conversation_history or [],
                 confirm_callback=actual_confirm,
                 mode="chat",
                 step_callback=step_callback,

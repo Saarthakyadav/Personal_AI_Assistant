@@ -43,6 +43,13 @@ from src.tools import ToolRegistry
 from src.tools.builtins import ALL_BUILTIN_TOOLS
 from src.tools.reminders import ReminderService, create_reminder_tool
 
+# Optional episodic memory — degrades gracefully if chromadb is absent
+try:
+    from src.memory_episodic import EpisodicMemory as _EpisodicMemoryClass
+    _EPISODIC_AVAILABLE = True
+except Exception:
+    _EPISODIC_AVAILABLE = False
+
 load_dotenv()
 
 # Startup message for Auth mode
@@ -68,6 +75,16 @@ print("✅ Groq ready")
 # User memory
 memory = UserMemory(filepath=os.path.join(os.path.dirname(__file__), "user_memory.json"))
 print(f"✅ User memory ready ({memory.fact_count} fact(s) loaded)")
+
+# Episodic memory
+episodic_memory = None
+if _EPISODIC_AVAILABLE:
+    try:
+        episodic_memory = _EpisodicMemoryClass()
+        print(f"✅ Episodic memory ready (turn index: {episodic_memory.next_turn_index})")
+    except Exception as e:
+        print(f"⚠️  Episodic memory init failed: {e}")
+        episodic_memory = None
 
 # Tool registry
 tool_registry = ToolRegistry()
@@ -163,6 +180,7 @@ agent = AgentCore(
     memory=memory,
     tool_registry=tool_registry,
     max_steps=10,
+    episodic_memory=episodic_memory,
 )
 print("✅ Agent core ready")
 
@@ -342,6 +360,7 @@ class ConfirmRequest(BaseModel):
 class WorkflowRequest(BaseModel):
     goal: str
     agents: Optional[List[str]] = None
+    session_id: Optional[str] = "default"
 
 class TaskCreateRequest(BaseModel):
     name: str
@@ -440,6 +459,22 @@ def chat(req: ChatRequest, current_user: Optional[dict] = Depends(check_auth_dep
         daemon=True,
     ).start()
 
+    # Store episodic turn in background
+    if episodic_memory is not None:
+        _ep_turn = agent._turn_counter - 1   # already incremented by run()
+        threading.Thread(
+            target=episodic_memory.store_turn,
+            args=(message, response_text, _ep_turn),
+            daemon=True,
+        ).start()
+
+    # Extract behavioral preferences in background
+    threading.Thread(
+        target=memory.extract_and_store_preferences,
+        args=(message, response_text, client),
+        daemon=True,
+    ).start()
+
     return ChatResponse(
         response=response_text,
         tools_used=tools_used,
@@ -534,6 +569,22 @@ async def voice_chat(file: UploadFile = File(...)):
 
     threading.Thread(
         target=memory.extract_and_store,
+        args=(transcript_text, response_text, client),
+        daemon=True,
+    ).start()
+
+    # Store episodic turn in background
+    if episodic_memory is not None:
+        _ep_turn = agent._turn_counter - 1
+        threading.Thread(
+            target=episodic_memory.store_turn,
+            args=(transcript_text, response_text, _ep_turn),
+            daemon=True,
+        ).start()
+
+    # Extract behavioral preferences in background
+    threading.Thread(
+        target=memory.extract_and_store_preferences,
         args=(transcript_text, response_text, client),
         daemon=True,
     ).start()
@@ -736,6 +787,25 @@ def run_workflow(req: WorkflowRequest):
                 )
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
+        # Store memory in background (same pattern as chat/voice endpoints)
+        threading.Thread(
+            target=memory.extract_and_store,
+            args=(req.goal, response_text, client),
+            daemon=True,
+        ).start()
+        if episodic_memory is not None:
+            _ep_turn = agent._turn_counter - 1
+            threading.Thread(
+                target=episodic_memory.store_turn,
+                args=(req.goal, response_text, _ep_turn),
+                daemon=True,
+            ).start()
+        threading.Thread(
+            target=memory.extract_and_store_preferences,
+            args=(req.goal, response_text, client),
+            daemon=True,
+        ).start()
+
         return {
             "result": response_text,
             "tools_used": tools_used,
@@ -744,8 +814,20 @@ def run_workflow(req: WorkflowRequest):
             "requires_confirmation": confirmation_result if confirmation_result else None
         }
 
+    # Note: for the orchestrator path, memory hooks run within the orchestrator's
+    # sub-agent threads.  Only the single-agent fallback path above runs here.
+
     try:
-        result = orchestrator.run_workflow(req.goal, agents=req.agents, confirm_callback=web_confirm)
+        session = _get_session(req.session_id or "default")
+        with _chat_lock:
+            history_snapshot = list(session["history"])
+
+        result = orchestrator.run_workflow(
+            req.goal,
+            agents=req.agents,
+            confirm_callback=web_confirm,
+            conversation_history=history_snapshot
+        )
         if confirmation_result:
             result["requires_confirmation"] = confirmation_result
         return result

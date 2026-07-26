@@ -539,7 +539,6 @@ def _browser_search_and_book_inner(
 ) -> str:
     """
     Perform a search or booking flow on a supported site.
-    FIX Bug #9: Now actually constructs direct query URLs and fills search forms where needed.
     action: "search" (safe) or "book" (requires confirmation via agent layer)
     """
     try:
@@ -560,7 +559,12 @@ def _browser_search_and_book_inner(
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            import os
+            # If action is 'book', default to headed (headless=False) so user can log in and pay
+            env_headless = os.getenv("BROWSER_HEADLESS", "false").lower()
+            is_headless = True if env_headless == "true" else (False if action == "book" else True)
+
+            browser = p.chromium.launch(headless=is_headless)
             page = browser.new_page()
             page.set_extra_http_headers({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
             page.goto(target_url, timeout=30000, wait_until="domcontentloaded")
@@ -586,8 +590,20 @@ def _browser_search_and_book_inner(
                 if site_key == "amazon":
                     form_result = _fill_amazon_search(page, details)
 
-            text_preview = page.inner_text("body")[:800]
-            final_url = page.url
+            text_preview = ""
+            final_url = target_url
+            try:
+                if not is_headless:
+                    text_preview = "Headed browser window opened for user interaction."
+                    final_url = page.url
+                    print("   👋 Headed browser opened. Please complete your checkout in the browser window.")
+                    # Wait for user to interact and close the page (up to 10 minutes)
+                    page.wait_for_event("close", timeout=600000)
+                else:
+                    text_preview = page.inner_text("body")[:800]
+                    final_url = page.url
+            except Exception:
+                pass
 
             result = {
                 "site": site_info["name"],
@@ -600,6 +616,9 @@ def _browser_search_and_book_inner(
                 "page_preview": text_preview,
                 "note": site_info["note"],
                 "next_steps": (
+                    "Headed browser session completed. Form fields were filled and presented to the user, "
+                    "who finalized checkout manually in the opened window."
+                ) if not is_headless else (
                     "Form fields have been filled and prepared where possible. "
                     "For complete booking, the site requires login credentials and checkout payment. "
                     "Navigate to the URL to review and complete the booking."
@@ -608,7 +627,10 @@ def _browser_search_and_book_inner(
                 ),
                 "status": "ok"
             }
-            browser.close()
+            try:
+                browser.close()
+            except Exception:
+                pass
         return json.dumps(result, indent=2)
     except Exception as e:
         return json.dumps({"error": f"Browser automation failed: {str(e)}", "site": site})

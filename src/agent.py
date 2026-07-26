@@ -18,10 +18,13 @@ Phase 1 fixes:
 
 import json
 import re
-from typing import Callable, List, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional
 
 from src.memory import UserMemory
 from src.tools import ToolRegistry
+
+if TYPE_CHECKING:
+    from src.memory_episodic import EpisodicMemory
 
 
 # Type aliases
@@ -38,13 +41,23 @@ class AgentCore:
         memory: UserMemory,
         tool_registry: ToolRegistry,
         max_steps: int = 10,
-        model: str = "llama-3.1-8b-instant",
+        model: Optional[str] = None,
+        episodic_memory: Optional["EpisodicMemory"] = None,
     ):
         self._client = groq_client
         self._memory = memory
         self._registry = tool_registry
         self._max_steps = max_steps
-        self._model = model
+        self._episodic_memory = episodic_memory
+        # Monotonically increasing counter — used as episodic turn index.
+        # Loaded from episodic_memory's persisted counter so it stays consistent
+        # across restarts even when episodic_memory is provided.
+        if episodic_memory is not None:
+            self._turn_counter: int = episodic_memory.next_turn_index
+        else:
+            self._turn_counter: int = 0
+        import os
+        self._model = model or os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -71,7 +84,28 @@ class AgentCore:
         Returns:
             The final text response to speak back to the user.
         """
-        messages = self._build_initial_messages(user_message, conversation_history, mode)
+        # ── Increment per-run turn counter ───────────────────────────────────────
+        current_turn = self._turn_counter
+        self._turn_counter += 1
+
+        # ── Build episodic context (older relevant turns) ──────────────────────
+        episodic_context = ""
+        if self._episodic_memory is not None:
+            try:
+                episodic_context = self._episodic_memory.get_episodic_prompt(
+                    user_message, current_turn
+                )
+            except Exception:
+                pass  # never let episodic retrieval crash the response path
+
+        # ── Build procedural preferences block ─────────────────────────────
+        prefs_block = self._memory.get_preferences_prompt()
+
+        messages = self._build_initial_messages(
+            user_message, conversation_history, mode,
+            episodic_context=episodic_context,
+            prefs_block=prefs_block,
+        )
         tool_defs = self._registry.get_tool_definitions()
 
         if step_callback:
@@ -227,7 +261,12 @@ class AgentCore:
     # ── Private helpers ───────────────────────────────────────────────────
 
     def _build_initial_messages(
-        self, user_message: str, conversation_history: list, mode: str = "chat"
+        self,
+        user_message: str,
+        conversation_history: list,
+        mode: str = "chat",
+        episodic_context: str = "",
+        prefs_block: str = "",
     ) -> list:
         """Assemble the full message list for the first LLM call."""
         facts_block = self._memory.get_facts_prompt()
@@ -266,8 +305,18 @@ class AgentCore:
             "- For irreversible actions (book, send, delete), ALWAYS explain what you will do "
             "before calling the tool — the guardrail system will ask the user to confirm.\n"
         )
+
+        # ── Tier 1: Semantic memory (user facts) ────────────────────────────────
         if facts_block:
             system_content += "\n" + facts_block
+
+        # ── Tier 2: Procedural memory (behavioral preferences) ─────────────────
+        if prefs_block:
+            system_content += "\n" + prefs_block
+
+        # ── Tier 3: Episodic memory (relevant past conversation turns) ───────
+        if episodic_context:
+            system_content += "\n" + episodic_context
 
         messages = [{"role": "system", "content": system_content}]
         messages.extend(conversation_history)
@@ -310,6 +359,54 @@ class AgentCore:
             return f"set a reminder at {time_str} to '{msg}'"
 
         if tool_name == "send_email":
+            draft_id = arguments.get("draft_id")
+            if draft_id:
+                details = None
+                try:
+                    from src.tools.email_tool import _SMTP_DRAFT_CACHE
+                    if draft_id in _SMTP_DRAFT_CACHE:
+                        details = _SMTP_DRAFT_CACHE[draft_id]
+                except Exception:
+                    pass
+
+                if not details:
+                    try:
+                        from google.oauth2.credentials import Credentials
+                        from google.auth.transport.requests import Request
+                        from googleapiclient.discovery import build
+                        import os
+                        
+                        token_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "token.json"))
+                        if os.path.exists(token_path):
+                            creds = Credentials.from_authorized_user_file(token_path, [
+                                'https://www.googleapis.com/auth/calendar',
+                                'https://www.googleapis.com/auth/gmail.modify',
+                                'https://www.googleapis.com/auth/gmail.send'
+                            ])
+                            if creds and creds.expired and creds.refresh_token:
+                                try:
+                                    creds.refresh(Request())
+                                except Exception:
+                                    creds = None
+                            if creds and creds.valid:
+                                service = build('gmail', 'v1', credentials=creds)
+                                draft = service.users().drafts().get(userId='me', id=draft_id, format='metadata').execute()
+                                msg = draft.get('message', {})
+                                payload = msg.get('payload', {})
+                                headers = payload.get('headers', [])
+                                to_val = next((h['value'] for h in headers if h['name'].lower() == 'to'), "?")
+                                sub_val = next((h['value'] for h in headers if h['name'].lower() == 'subject'), "?")
+                                details = {"to": to_val, "subject": sub_val}
+                    except Exception as e:
+                        print(f"⚠️ Failed to fetch draft details from Gmail API: {e}")
+
+                if details:
+                    to = details.get("to", "?")
+                    subject = details.get("subject", "?")
+                    return f"send email draft {draft_id} (to {to} with subject '{subject}')"
+                else:
+                    return f"send email draft {draft_id}"
+
             to = arguments.get("to", "?")
             subject = arguments.get("subject", "?")
             return f"send an email to {to} with subject '{subject}'"
@@ -341,12 +438,68 @@ class AgentCore:
         return f"use {tool_name}({args_str})" if args_str else f"use {tool_name}"
 
     @staticmethod
+    def _repair_json(raw: str) -> dict | None:
+        """
+        Attempt to repair malformed JSON from LLM tool calls.
+
+        Common LLM mistakes this handles:
+        - Stray characters after values: "INBOX)}  →  "INBOX"
+        - Missing closing quote:        "INBOX   →  "INBOX"
+        - Trailing commas before }
+        """
+        import re as _re
+
+        # Strip everything outside the outermost { ... }
+        first = raw.find('{')
+        last = raw.rfind('}')
+        if first == -1 or last == -1:
+            return None
+        candidate = raw[first:last + 1]
+
+        # Attempt 1: try as-is
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+        # Attempt 2: strip non-JSON chars between closing quote and next delimiter
+        # e.g.  "INBOX)}  →  "INBOX"
+        cleaned = _re.sub(r'"([^"]*?)[)}\]]+(?=[,}\]])', r'"\1"', candidate)
+        # Fix trailing commas before }
+        cleaned = _re.sub(r',\s*}', '}', cleaned)
+        # Ensure balanced braces
+        open_count = cleaned.count('{')
+        close_count = cleaned.count('}')
+        if open_count > close_count:
+            cleaned += '}' * (open_count - close_count)
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
+
+        # Attempt 3: extract key-value pairs via regex as last resort
+        pairs = _re.findall(r'"(\w+)"\s*:\s*(?:"([^"]*?)"|(\d+(?:\.\d+)?))', candidate)
+        if pairs:
+            result = {}
+            for key, str_val, num_val in pairs:
+                if num_val:
+                    result[key] = int(num_val) if '.' not in num_val else float(num_val)
+                else:
+                    result[key] = str_val
+            return result
+
+        return None
+
+    @staticmethod
     def _parse_failed_tool_call(error) -> tuple:
         """
         Extract tool name and args from Groq's tool_use_failed error.
 
         BUG FIX #7: Use a balanced-brace JSON extractor instead of .*? which
         fails on nested objects like {"details": {"from": "DEL", "to": "BOM"}}.
+
+        Enhanced: Falls back to _repair_json when json.loads fails on
+        malformed LLM output (e.g. missing quotes, stray parentheses).
         """
         try:
             error_str = str(error)
@@ -372,10 +525,23 @@ class AgentCore:
                     depth -= 1
                     if depth == 0:
                         json_str = error_str[start_idx:i + 1]
-                        arguments = json.loads(json_str)
-                        if not isinstance(arguments, dict):
-                            arguments = {}
-                        return tool_name, arguments
+                        try:
+                            arguments = json.loads(json_str)
+                            if not isinstance(arguments, dict):
+                                arguments = {}
+                            return tool_name, arguments
+                        except json.JSONDecodeError:
+                            break  # fall through to repair
+
+            # 3. Fallback: extract the raw JSON-ish region and attempt repair
+            end_marker = error_str.find('</function>', start_idx)
+            if end_marker == -1:
+                end_marker = len(error_str)
+            raw_json = error_str[start_idx:end_marker]
+            repaired = AgentCore._repair_json(raw_json)
+            if repaired is not None:
+                print(f"   🔧 Repaired malformed JSON for {tool_name}: {repaired}")
+                return tool_name, repaired
 
         except Exception:
             pass

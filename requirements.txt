@@ -17,7 +17,7 @@ elevenlabs>=1.0.0
 pygame>=2.5.0
 
 # ── Web search (free, no API key) ─────────────────────────────────────────────
-duckduckgo-search>=6.0.0
+ddgs>=9.14.4
 
 # ── Utilities ──────────────────────────────────────────────────────────────────
 python-dotenv==1.0.0
@@ -41,8 +41,10 @@ websockets>=12.0
 playwright>=1.44.0
 # After install, run: playwright install chromium
 
-# ── Phase 3: Email ─────────────────────────────────────────────────────────────
-# Built-in smtplib is used — no extra package needed.
+# ── Phase 3: Email & Calendar (Google API) ────────────────────────────────────
+google-auth-oauthlib>=1.0.0
+google-auth-httplib2>=0.2.0
+google-api-python-client>=2.100.0
 
 # ── Phase 4: RAG / PDF indexing ───────────────────────────────────────────────
 chromadb>=0.5.0

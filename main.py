@@ -42,6 +42,13 @@ from src.tools import ToolRegistry
 from src.tools.builtins import ALL_BUILTIN_TOOLS
 from src.tools.reminders import ReminderService, create_reminder_tool
 
+# Optional episodic memory — degrades gracefully if chromadb is absent
+try:
+    from src.memory_episodic import EpisodicMemory as _EpisodicMemoryClass
+    _EPISODIC_AVAILABLE = True
+except Exception:
+    _EPISODIC_AVAILABLE = False
+
 load_dotenv()
 
 RATE         = 16000
@@ -74,10 +81,22 @@ if not api_key:
 client = Groq(api_key=api_key)
 print("✅ Groq ready (Whisper + Llama)")
 
-# ── Persistent user memory ───────────────────────────────────
+# ── Persistent user memory ───────────────────────────────────────────
 print("\n🧠 Loading user memory...")
 memory = UserMemory(filepath=os.path.join(os.path.dirname(__file__), "user_memory.json"))
 print(f"✅ User memory ready ({memory.fact_count} fact(s) loaded)")
+
+# ── Episodic memory ────────────────────────────────────────────────────
+episodic_memory = None
+if _EPISODIC_AVAILABLE:
+    try:
+        episodic_memory = _EpisodicMemoryClass()
+        print(f"✅ Episodic memory ready (turn index: {episodic_memory.next_turn_index})")
+    except Exception as e:
+        print(f"⚠️ Episodic memory init failed: {e}")
+        episodic_memory = None
+else:
+    episodic_memory = None
 
 # ── Tool registry ────────────────────────────────────────────
 print("\n🔧 Registering tools...")
@@ -335,6 +354,22 @@ def process_wake_command(audio: np.ndarray):
             daemon=True,
         ).start()
 
+        # Store episodic turn in background (non-blocking)
+        if episodic_memory is not None:
+            _ep_turn = agent._turn_counter - 1   # already incremented by run()
+            threading.Thread(
+                target=episodic_memory.store_turn,
+                args=(cleaned, response, _ep_turn),
+                daemon=True,
+            ).start()
+
+        # Extract behavioral preferences in background (non-blocking)
+        threading.Thread(
+            target=memory.extract_and_store_preferences,
+            args=(cleaned, response, client),
+            daemon=True,
+        ).start()
+
         speak(response)
 
     finally:
@@ -371,6 +406,7 @@ def _init_services():
         memory=memory,
         tool_registry=tool_registry,
         max_steps=5,
+        episodic_memory=episodic_memory,
     )
     print("✅ Agent core ready")
 
