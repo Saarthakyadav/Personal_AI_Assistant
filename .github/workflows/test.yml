@@ -9,4 +9,12 @@ jobs:
         with:
           python-version: "3.10"
       - run: pip install -r requirements-dev.txt
-      - run: pytest src/ -v
+      - name: Run tests
+        env:
+          # Dummy values so server.py can be imported during test collection
+          # without hitting the GROQ_API_KEY guard. No real API calls are made
+          # by unit tests — these values are never sent to any external service.
+          GROQ_API_KEY: ci-placeholder-not-a-real-key
+          SECRET_KEY: ci-test-secret-key-not-for-production
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: pytest src/ -v

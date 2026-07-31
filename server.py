@@ -68,7 +68,9 @@ print("=" * 60)
 api_key = os.getenv("GROQ_API_KEY")
 if not api_key:
     print("❌ No GROQ_API_KEY found in .env file")
-    sys.exit(1)
+    raise RuntimeError(
+        "GROQ_API_KEY is required. Set it in your .env file before starting the server."
+    )
 client = Groq(api_key=api_key)
 print("✅ Groq ready")
 
