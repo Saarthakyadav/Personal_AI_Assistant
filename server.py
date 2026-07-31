@@ -369,6 +369,24 @@ class TaskCreateRequest(BaseModel):
     trigger_args: dict  # e.g. {"minutes": 30} or {"hour": 9, "minute": 0}
 
 
+class PluginExecuteRequest(BaseModel):
+    """
+    Request body for POST /api/plugins/servers/{server_name}/tools/{tool_name}/execute.
+
+    This is a new request contract (the previous endpoint accepted a bare
+    arguments dict with no Pydantic wrapper and no approval field).  Since the
+    endpoint has no live callers in the UI, this is a non-breaking change.
+
+    Fields:
+        arguments:  Keyword arguments forwarded to the tool handler.
+        approved:   True if the user has explicitly approved execution of a
+                    high-risk tool.  Defaults to False.  High-risk tools
+                    (those in HIGH_RISK_TOOLS) require approved=True;
+                    without it a 202 confirmation_required response is returned.
+    """
+    arguments: dict = {}
+    approved: bool = False
+
 from src.auth import oauth2_scheme, get_current_user
 
 def check_auth_dependency(token: Optional[str] = Depends(oauth2_scheme)):
@@ -935,8 +953,17 @@ def list_plugin_server_tools(server_name: str):
 
 
 @app.post("/api/plugins/servers/{server_name}/tools/{tool_name}/execute")
-def execute_plugin_tool(server_name: str, tool_name: str, arguments: dict = Body(default={})):
-    """Execute a plugin tool directly."""
+def execute_plugin_tool(server_name: str, tool_name: str, req: PluginExecuteRequest):
+    """
+    Execute a plugin tool directly.
+
+    Request body (JSON):
+        {"arguments": {<tool kwargs>}, "approved": true|false}
+
+    High-risk tools (requires_confirmation=True in their Tool definition) will
+    return a 202 confirmation_required response unless "approved": true is sent.
+    Callers must re-send the full request with "approved": true to proceed.
+    """
     if plugin_adapter is None:
         raise HTTPException(
             status_code=503,
@@ -945,24 +972,28 @@ def execute_plugin_tool(server_name: str, tool_name: str, arguments: dict = Body
     server = plugin_adapter.get_server(server_name)
     if not server:
         raise HTTPException(status_code=404, detail=f"Plugin server '{server_name}' not found")
-    
+
     tool = server.get_tool(tool_name)
     if not tool:
         raise HTTPException(status_code=404, detail=f"Plugin tool '{tool_name}' not found on server '{server_name}'")
-        
-    if tool.requires_confirmation:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Tool '{tool_name}' requires user confirmation. Use /api/chat instead."
-        )
-        
+
     try:
-        result = plugin_adapter.execute(server_name, tool_name, arguments)
-        return json.loads(result)
+        result_str = plugin_adapter.execute(
+            server_name, tool_name, req.arguments, approved=req.approved
+        )
+        result = json.loads(result_str)
     except json.JSONDecodeError:
-        return {"result": result}
+        return {"result": result_str}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    # If the adapter returned a confirmation_required payload, surface it as 202
+    # so clients can distinguish it from a successful 200 or an error 4xx/5xx.
+    if isinstance(result, dict) and result.get("status") == "confirmation_required":
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=202, content=result)
+
+    return result
 
 
 @app.get("/api/status")

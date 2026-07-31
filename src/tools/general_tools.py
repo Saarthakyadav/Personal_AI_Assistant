@@ -10,6 +10,7 @@ All side-effecting tools require confirmation.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,21 @@ import urllib.request
 from typing import Optional
 
 from src.tools import Tool
+
+
+# ── Code-execution static blacklist ───────────────────────────────────────────
+# Compiled once at module load.  Each entry: (label, compiled pattern).
+# Used by _execute_python() and (via the same concept) _schedule_task() in
+# automation.py, which scans the goal string.
+_CODE_BLACKLIST = [
+    ("rm_rf",              re.compile(r"rm\s+-[^\s]*r[^\s]*f|rm\s+-rf", re.IGNORECASE)),
+    ("shutil_rmtree_root", re.compile(r"shutil\.rmtree\s*\(\s*['\"/]")),
+    ("os_system",          re.compile(r"\bos\.system\s*\(")),
+    ("subprocess_shell",   re.compile(r"subprocess\.[^\n(]+\bshell\s*=\s*True")),
+    ("mkfs",               re.compile(r"\bmkfs\b", re.IGNORECASE)),
+    ("format_c",           re.compile(r"\bformat\s+c:", re.IGNORECASE)),
+    ("os_remove_root",     re.compile(r"\bos\.remove\s*\(\s*['\"/]")),
+]
 
 
 # ── 1. execute_python ─────────────────────────────────────────────────────────
@@ -65,6 +81,18 @@ def _execute_python(code: str, timeout: int = 10) -> str:
 
         env["TEMP"] = tempfile.gettempdir()
         env["TMP"] = tempfile.gettempdir()
+
+        # ── Static blacklist: block obviously destructive patterns ────────────
+        # String-level check only; does not replace subprocess isolation.
+        for bl_name, bl_pattern in _CODE_BLACKLIST:
+            if bl_pattern.search(code):
+                return json.dumps({
+                    "error": "blocked",
+                    "reason": (
+                        f"Code contains a potentially destructive pattern ({bl_name}) "
+                        "and was not executed. Remove or revise the flagged construct."
+                    ),
+                })
 
         result = subprocess.run(
             [sys.executable, tmp.name],

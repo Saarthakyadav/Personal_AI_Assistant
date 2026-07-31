@@ -20,6 +20,7 @@ import json
 import re
 from typing import TYPE_CHECKING, Callable, List, Optional
 
+from src.guardrails import sanitize_input, scrub_output
 from src.memory import UserMemory
 from src.tools import ToolRegistry
 
@@ -84,6 +85,11 @@ class AgentCore:
         Returns:
             The final text response to speak back to the user.
         """
+        # ── Guardrails: screen for prompt-injection patterns ──────────────────
+        _, flagged = sanitize_input(user_message)
+        if flagged:
+            _print_log(f"   🛡️ Input guardrail flagged patterns: {flagged}")
+
         # ── Increment per-run turn counter ───────────────────────────────────────
         current_turn = self._turn_counter
         self._turn_counter += 1
@@ -195,7 +201,7 @@ class AgentCore:
                 print(f"   ✅ Agent done (text response)")
                 if step_callback:
                     step_callback("done", "Response ready")
-                return final_text.strip()
+                return scrub_output(final_text.strip())
 
             # ── Case 2: LLM wants to call tool(s) ────────────────────
             messages.append(self._serialize_assistant_message(assistant_msg))

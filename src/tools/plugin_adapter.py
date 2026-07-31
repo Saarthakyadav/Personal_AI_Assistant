@@ -12,6 +12,7 @@ Provides the architectural abstraction: tool grouping, server discovery, and uni
 import json
 from typing import Dict, List, Optional, Callable
 from src.tools import Tool, ToolRegistry
+from src.guardrails import HIGH_RISK_TOOLS
 
 
 class PluginServer:
@@ -82,7 +83,7 @@ class PluginAdapter:
                     def make_plugin_handler(s_name=server.name, t_name=tool_name):
                         def plugin_handler(*args, **kwargs):
                             print(f"🔌 [Plugin Route] server: '{s_name}' -> tool: '{t_name}'")
-                            return self.execute(s_name, t_name, kwargs)
+                            return self.execute(s_name, t_name, kwargs, approved=False)
                         return plugin_handler
 
                     tool.handler = make_plugin_handler()
@@ -104,8 +105,20 @@ class PluginAdapter:
                 return server.name
         return None
 
-    def execute(self, server_name: str, tool_name: str, arguments: dict) -> str:
-        """Execute a tool via its server. Returns JSON result or error."""
+    def execute(self, server_name: str, tool_name: str, arguments: dict, approved: bool = False) -> str:
+        """
+        Execute a tool via its server.  Returns JSON result or error.
+
+        Args:
+            server_name: Name of the plugin server (e.g. "email", "calendar").
+            tool_name:   Name of the tool to invoke.
+            arguments:   Keyword arguments forwarded to the handler.
+            approved:    If True, the caller has obtained explicit user approval
+                         for this tool call.  Required for any tool in
+                         HIGH_RISK_TOOLS; without it, returns a
+                         {"status": "confirmation_required"} payload instead
+                         of calling the handler.
+        """
         server = self._servers.get(server_name)
         if not server:
             return json.dumps({"error": f"Plugin server '{server_name}' not found."})
@@ -115,6 +128,18 @@ class PluginAdapter:
             return json.dumps({
                 "error": f"Tool '{tool_name}' not found on server '{server_name}'.",
                 "available_tools": server.list_tools(),
+            })
+
+        # ── Approval gate for high-risk tools ────────────────────────────────
+        if tool_name in HIGH_RISK_TOOLS and not approved:
+            return json.dumps({
+                "status": "confirmation_required",
+                "tool_name": tool_name,
+                "description": (
+                    f"Tool '{tool_name}' is high-risk and requires explicit user "
+                    f"approval before execution.  Re-send the request with "
+                    f'{{"approved": true}} to proceed.'
+                ),
             })
 
         original_handler = server._original_handlers.get(tool_name)

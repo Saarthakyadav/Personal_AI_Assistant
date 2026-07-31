@@ -12,6 +12,17 @@ def create_automation_tools(scheduler) -> list:
 
     def _schedule_task(name: str, goal: str, trigger: str, trigger_args: dict) -> str:
         try:
+            from src.tools.general_tools import _CODE_BLACKLIST
+            for bl_name, bl_pattern in _CODE_BLACKLIST:
+                if bl_pattern.search(goal):
+                    return json.dumps({
+                        "error": "blocked",
+                        "reason": (
+                            f"Scheduled goal contains a potentially destructive pattern "
+                            f"({bl_name}) and was not scheduled. "
+                            "Scheduled tasks run unattended — revise the goal string."
+                        ),
+                    })
             task_id = scheduler.schedule_task(
                 name=name,
                 goal=goal,

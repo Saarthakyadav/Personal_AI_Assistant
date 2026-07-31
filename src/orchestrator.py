@@ -16,6 +16,7 @@ then aggregates results into a final response.
 import json
 import time
 from typing import List, Optional, Dict, Any
+from src.guardrails import sanitize_input, scrub_output
 from src.tools import ToolRegistry
 from src.memory import UserMemory
 
@@ -77,6 +78,17 @@ class Orchestrator:
         if step_callback:
             step_callback("plan", f"Planning workflow for: {goal[:80]}")
 
+        # ── Guardrails: screen goal for prompt-injection patterns ──────────────
+        _, flagged = sanitize_input(goal)
+        if flagged:
+            import sys
+            msg = f"   🛡️ Workflow guardrail flagged patterns in goal: {flagged}"
+            try:
+                print(msg)
+            except UnicodeEncodeError:
+                sys.stdout.buffer.write((msg + "\n").encode("utf-8", errors="replace"))
+                sys.stdout.buffer.flush()
+
         # Step 1: Use LLM to plan which agents to use
         plan = self._plan_workflow(goal, agents)
         if step_callback:
@@ -132,7 +144,7 @@ class Orchestrator:
             final_result = self._synthesize_results(goal, results)
 
         return {
-            "result": final_result,
+            "result": scrub_output(final_result),
             "steps": results,
             "agents_used": agents_used,
             "tools_used": list(dict.fromkeys(all_tools_used)),  # deduplicated
